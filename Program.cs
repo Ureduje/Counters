@@ -1190,7 +1190,7 @@ namespace VzpenjacaKontrola
             {
                 Height = 4,
                 CornerRadius = new CornerRadius(2),
-                Background = ThemePalette.AccentEmerald,
+                Background = ThemePalette.AccentBtnMuted,
                 HorizontalAlignment = HorizontalAlignment.Left,
                 Width = 0
             };
@@ -1559,7 +1559,7 @@ namespace VzpenjacaKontrola
             {
                 personsZone = 0;
                 _txtPersonsCurrent.Foreground = ThemePalette.TextPrimary;
-                _personsProgressFill.Background = ThemePalette.AccentEmerald;
+                _personsProgressFill.Background = ThemePalette.AccentBtnMuted;
             }
 
             if (!suppressChime && !_isMuted && _lastPersonsZone >= 0 && personsZone > _lastPersonsZone)
