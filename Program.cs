@@ -50,6 +50,7 @@ namespace VzpenjacaKontrola
         public double WindowLeft = double.NaN;
         public double WindowTop = double.NaN;
         public double CounterScale = 1.0;
+        public bool HideWindowControls = false;
 
         private static string ConfigPath
         {
@@ -115,6 +116,10 @@ namespace VzpenjacaKontrola
                             if (double.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out cs) && cs >= 0.6 && cs <= 2.2)
                                 cfg.CounterScale = cs;
                         }
+                        else if (key.Equals("HideWindowControls", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.HideWindowControls = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
                     }
                 }
             }
@@ -140,6 +145,7 @@ namespace VzpenjacaKontrola
                 if (!double.IsNaN(WindowTop) && !double.IsInfinity(WindowTop))
                     sb.AppendLine("WindowTop=" + WindowTop.ToString("0", CultureInfo.InvariantCulture));
                 sb.AppendLine("CounterScale=" + CounterScale.ToString("0.00", CultureInfo.InvariantCulture));
+                sb.AppendLine("HideWindowControls=" + (HideWindowControls ? "true" : "false"));
                 File.WriteAllText(ConfigPath, sb.ToString(), Encoding.UTF8);
             }
             catch { }
@@ -1146,6 +1152,7 @@ namespace VzpenjacaKontrola
         private const int IDM_ZOOM_IN = 0x1010;
         private const int IDM_ZOOM_OUT = 0x1011;
         private const int IDM_ZOOM_RESET = 0x1012;
+        private const int IDM_TOGGLE_CONTROLS = 0x1013;
 
         [DllImport("user32.dll")]
         private static extern IntPtr GetSystemMenu(IntPtr hWnd, bool bRevert);
@@ -1173,6 +1180,7 @@ namespace VzpenjacaKontrola
             MinWidth = 280;
             MinHeight = 460;
             Topmost = _config.AlwaysOnTop;
+            WindowStyle = _config.HideWindowControls ? WindowStyle.None : WindowStyle.SingleBorderWindow;
 
             if (IsPositionValid(_config.WindowLeft, _config.WindowTop, _config.WindowWidth, _config.WindowHeight))
             {
@@ -1216,8 +1224,23 @@ namespace VzpenjacaKontrola
             SizeChanged += (s, e) => SaveWindowBounds();
             Closing += (s, e) => SaveWindowBounds();
 
+            MouseLeftButtonDown += (s, e) =>
+            {
+                if (WindowStyle == WindowStyle.None && e.ButtonState == MouseButtonState.Pressed)
+                {
+                    DragMove();
+                }
+            };
+
             KeyDown += (s, e) =>
             {
+                if (e.Key == Key.F11)
+                {
+                    ToggleWindowControls();
+                    e.Handled = true;
+                    return;
+                }
+
                 if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
                 {
                     if (e.Key == Key.OemPlus || e.Key == Key.Add)
@@ -1302,9 +1325,38 @@ namespace VzpenjacaKontrola
             _config.Save();
         }
 
+        public void ToggleWindowControls()
+        {
+            if (WindowStyle == WindowStyle.None)
+            {
+                WindowStyle = WindowStyle.SingleBorderWindow;
+                _config.HideWindowControls = false;
+            }
+            else
+            {
+                WindowStyle = WindowStyle.None;
+                _config.HideWindowControls = true;
+            }
+            _config.Save();
+            RefreshSystemMenu();
+        }
+
         private void OnSourceInitialized(object sender, EventArgs e)
         {
+            RefreshSystemMenu();
+
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            HwndSource source = HwndSource.FromHwnd(hwnd);
+            if (source != null)
+            {
+                source.AddHook(WndProc);
+            }
+        }
+
+        private void RefreshSystemMenu()
+        {
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd == IntPtr.Zero) return;
             _hSysMenu = GetSystemMenu(hwnd, false);
             if (_hSysMenu != IntPtr.Zero)
             {
@@ -1312,17 +1364,12 @@ namespace VzpenjacaKontrola
                 uint autostartFlag = _config.StartWithWindows ? MF_CHECKED : MF_UNCHECKED;
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | topFlag, (UIntPtr)IDM_ALWAYS_ON_TOP, "Vedno na vrhu");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | autostartFlag, (UIntPtr)IDM_START_WITH_WINDOWS, "Zaženi ob zagonu računalnika");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_TOGGLE_CONTROLS, "Preklopi kontrole okna\t(F11)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_IN, "Povečaj števce\t(Ctrl +)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_OUT, "Pomanjšaj števce\t(Ctrl -)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_RESET, "Ponastavi velikost števcev\t(Ctrl 0)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
-            }
-
-            HwndSource source = HwndSource.FromHwnd(hwnd);
-            if (source != null)
-            {
-                source.AddHook(WndProc);
             }
         }
 
@@ -1353,6 +1400,11 @@ namespace VzpenjacaKontrola
                     {
                         CheckMenuItem(_hSysMenu, IDM_START_WITH_WINDOWS, MF_BYCOMMAND | (_config.StartWithWindows ? MF_CHECKED : MF_UNCHECKED));
                     }
+                    handled = true;
+                }
+                else if (cmd == IDM_TOGGLE_CONTROLS)
+                {
+                    ToggleWindowControls();
                     handled = true;
                 }
                 else if (cmd == IDM_ZOOM_IN)
