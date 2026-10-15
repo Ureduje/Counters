@@ -813,9 +813,10 @@ namespace VzpenjacaKontrola
             _txtSetTimeValue = new TextBlock
             {
                 Text = "Interval: --:--",
-                Foreground = ThemePalette.TextMuted,
-                FontFamily = new FontFamily("Segoe UI"),
+                Foreground = ThemePalette.TextSecondary,
+                FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
                 FontSize = 10.5,
+                FontWeight = FontWeights.SemiBold,
                 HorizontalAlignment = HorizontalAlignment.Right
             };
             timeTopRow.Children.Add(lblTimeHeader);
