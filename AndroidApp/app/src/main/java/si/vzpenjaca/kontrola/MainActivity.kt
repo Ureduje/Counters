@@ -3,7 +3,11 @@ package si.vzpenjaca.kontrola
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
@@ -71,6 +75,10 @@ class MobileConfig(private val context: Context) {
     var confirmReset: Boolean = true
     var muteZgoraj: Boolean = false
     var muteSpodaj: Boolean = false
+    var dimZgoraj: Boolean = false
+    var dimSpodaj: Boolean = false
+    var showIntervalBgZgoraj: Boolean = true
+    var showIntervalBgSpodaj: Boolean = true
 
     init {
         load()
@@ -87,6 +95,10 @@ class MobileConfig(private val context: Context) {
         if (prefs.contains("confirmReset")) confirmReset = prefs.getBoolean("confirmReset", true)
         if (prefs.contains("muteZgoraj")) muteZgoraj = prefs.getBoolean("muteZgoraj", false)
         if (prefs.contains("muteSpodaj")) muteSpodaj = prefs.getBoolean("muteSpodaj", false)
+        if (prefs.contains("dimZgoraj")) dimZgoraj = prefs.getBoolean("dimZgoraj", false)
+        if (prefs.contains("dimSpodaj")) dimSpodaj = prefs.getBoolean("dimSpodaj", false)
+        if (prefs.contains("showIntervalBgZgoraj")) showIntervalBgZgoraj = prefs.getBoolean("showIntervalBgZgoraj", true)
+        if (prefs.contains("showIntervalBgSpodaj")) showIntervalBgSpodaj = prefs.getBoolean("showIntervalBgSpodaj", true)
     }
 
     fun save() {
@@ -101,6 +113,10 @@ class MobileConfig(private val context: Context) {
             .putBoolean("confirmReset", confirmReset)
             .putBoolean("muteZgoraj", muteZgoraj)
             .putBoolean("muteSpodaj", muteSpodaj)
+            .putBoolean("dimZgoraj", dimZgoraj)
+            .putBoolean("dimSpodaj", dimSpodaj)
+            .putBoolean("showIntervalBgZgoraj", showIntervalBgZgoraj)
+            .putBoolean("showIntervalBgSpodaj", showIntervalBgSpodaj)
             .apply()
     }
 
@@ -448,10 +464,13 @@ class MainActivity : Activity() {
             stationId = "zgoraj",
             stationTitle = "ZGORNJA POSTAJA",
             initialMuted = config.muteZgoraj,
-            onMuteToggled = { muted ->
+            initialDimmed = config.dimZgoraj,
+            initialShowIntervalBg = config.showIntervalBgZgoraj,
+            onQuickSettingsChanged = { muted, dimmed, showIntervalBg ->
                 config.muteZgoraj = muted
+                config.dimZgoraj = dimmed
+                config.showIntervalBgZgoraj = showIntervalBg
                 config.save()
-                if (!muted && MobileChimePlayer.enabled) MobileChimePlayer.playTimeSingle()
             },
             onOperatorCommand = { cmdId ->
                 handleOperatorCommand("zgoraj", cmdId)
@@ -467,10 +486,13 @@ class MainActivity : Activity() {
             stationId = "spodaj",
             stationTitle = "SPODNJA POSTAJA",
             initialMuted = config.muteSpodaj,
-            onMuteToggled = { muted ->
+            initialDimmed = config.dimSpodaj,
+            initialShowIntervalBg = config.showIntervalBgSpodaj,
+            onQuickSettingsChanged = { muted, dimmed, showIntervalBg ->
                 config.muteSpodaj = muted
+                config.dimSpodaj = dimmed
+                config.showIntervalBgSpodaj = showIntervalBg
                 config.save()
-                if (!muted && MobileChimePlayer.enabled) MobileChimePlayer.playTimeSingle()
             },
             onOperatorCommand = { cmdId ->
                 handleOperatorCommand("spodaj", cmdId)
@@ -987,21 +1009,178 @@ class MainActivity : Activity() {
     }
 }
 
+/**
+ * Compact icon toggle pill button for station header quick settings (Mute chimes / Dim view),
+ * matching HeaderQuickToggleButton in the PC version.
+ */
+class HeaderQuickToggleButton(
+    context: Context,
+    private val isMuteButton: Boolean,
+    initialActive: Boolean,
+    private val onToggled: (Boolean) -> Unit
+) : View(context) {
+
+    var isActive: Boolean = initialActive
+        set(value) {
+            field = value
+            updateVisuals()
+            invalidate()
+        }
+
+    private var isPressedState = false
+    private val bgDrawable = GradientDrawable()
+    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val iconPath = Path()
+    private val arcRect1 = RectF()
+    private val arcRect2 = RectF()
+
+    init {
+        background = bgDrawable
+        updateVisuals()
+
+        setOnTouchListener { v, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    isPressedState = true
+                    updateVisuals()
+                    invalidate()
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    isPressedState = false
+                    isActive = !isActive
+                    v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                    onToggled(isActive)
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    isPressedState = false
+                    updateVisuals()
+                    invalidate()
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun updateVisuals() {
+        bgDrawable.cornerRadius = dpF(5f)
+        val strokePx = max(1, dpF(1f).roundToInt())
+        if (isActive) {
+            bgDrawable.setColor(if (isPressedState) ThemeColors.BtnBg else ThemeColors.BtnPressedBg)
+            bgDrawable.setStroke(strokePx, if (isPressedState) ThemeColors.TextPrimary else ThemeColors.TextSecondary)
+            iconPaint.color = ThemeColors.TextPrimary
+        } else {
+            bgDrawable.setColor(if (isPressedState) ThemeColors.BtnPressedBg else ThemeColors.BtnBg)
+            bgDrawable.setStroke(strokePx, if (isPressedState) ThemeColors.AccentBlue else ThemeColors.BtnBorder)
+            iconPaint.color = if (isPressedState) ThemeColors.TextPrimary else ThemeColors.TextSecondary
+        }
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+
+        val iconSize = min(w, h) * 0.72f
+        val scale = iconSize / 16f
+        val ox = (w - 16f * scale) * 0.5f
+        val oy = (h - 16f * scale) * 0.5f
+
+        iconPaint.strokeWidth = max(1.5f, 1.5f * scale)
+        iconPath.reset()
+
+        if (isMuteButton) {
+            // Speaker polygon: M 2,6 L 5,6 L 8.8,2.6 L 8.8,13.4 L 5,10 L 2,10 Z
+            iconPath.moveTo(ox + 2f * scale, oy + 6f * scale)
+            iconPath.lineTo(ox + 5f * scale, oy + 6f * scale)
+            iconPath.lineTo(ox + 8.8f * scale, oy + 2.6f * scale)
+            iconPath.lineTo(ox + 8.8f * scale, oy + 13.4f * scale)
+            iconPath.lineTo(ox + 5f * scale, oy + 10f * scale)
+            iconPath.lineTo(ox + 2f * scale, oy + 10f * scale)
+            iconPath.close()
+            canvas.drawPath(iconPath, iconPaint)
+
+            if (isActive) {
+                // Muted X: M 11.2,5.5 L 15.0,10.5 M 15.0,5.5 L 11.2,10.5
+                canvas.drawLine(
+                    ox + 11.2f * scale, oy + 5.5f * scale,
+                    ox + 15.0f * scale, oy + 10.5f * scale,
+                    iconPaint
+                )
+                canvas.drawLine(
+                    ox + 15.0f * scale, oy + 5.5f * scale,
+                    ox + 11.2f * scale, oy + 10.5f * scale,
+                    iconPaint
+                )
+            } else {
+                // Sound waves
+                arcRect1.set(
+                    ox + 7.6f * scale, oy + 4.8f * scale,
+                    ox + 12.2f * scale, oy + 11.2f * scale
+                )
+                canvas.drawArc(arcRect1, -48f, 96f, false, iconPaint)
+
+                arcRect2.set(
+                    ox + 6.8f * scale, oy + 2.8f * scale,
+                    ox + 14.5f * scale, oy + 13.2f * scale
+                )
+                canvas.drawArc(arcRect2, -52f, 104f, false, iconPaint)
+            }
+        } else {
+            // Crescent Moon matching GeomDimMoon in PC version
+            val cx = ox + 8.2f * scale
+            val cy = oy + 8.0f * scale
+            val rOuter = 4.9f * scale
+            iconPath.addCircle(cx, cy, rOuter, Path.Direction.CW)
+
+            val cutPath = Path()
+            cutPath.addCircle(cx + 2.8f * scale, cy - 2.0f * scale, 4.1f * scale, Path.Direction.CW)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                iconPath.op(cutPath, Path.Op.DIFFERENCE)
+            }
+            canvas.drawPath(iconPath, iconPaint)
+        }
+    }
+
+    private fun dpF(value: Float): Float {
+        return TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP,
+            value,
+            resources.displayMetrics
+        )
+    }
+}
+
 class StationCardView(
     context: Context,
     val stationId: String,
     stationTitle: String,
     initialMuted: Boolean,
-    private val onMuteToggled: (Boolean) -> Unit,
+    initialDimmed: Boolean,
+    initialShowIntervalBg: Boolean,
+    private val onQuickSettingsChanged: (muted: Boolean, dimmed: Boolean, showIntervalBg: Boolean) -> Unit,
     private val onOperatorCommand: (Int) -> Unit
 ) : LinearLayout(context) {
 
+    private val cardBgDrawable: GradientDrawable
+    private val lblStation: TextView
+    private val statusPanel: LinearLayout
     private val statusDot: View
     private val statusText: TextView
-    private val btnMute: TextView
+    private val btnMute: HeaderQuickToggleButton
+    private val btnDim: HeaderQuickToggleButton
+    private val contentContainer: LinearLayout
 
     private val txtTimerValue: TextView
     private val txtSetTimeValue: TextView
+    private val txtBgIntervalValue: TextView
     private val timerProgressTrack: FrameLayout
     private val timerProgressFill: View
 
@@ -1016,6 +1195,8 @@ class StationCardView(
     private var currentPersons = 0
     private var maxPersons = 28
     private var isMuted = initialMuted
+    private var isDimmed = initialDimmed
+    private var showIntervalBg = initialShowIntervalBg
     private var lastTimeZone = -1
     private var lastPersonsZone = -1
     private var hasInitialTelemetry = false
@@ -1024,20 +1205,21 @@ class StationCardView(
         orientation = VERTICAL
         val pad = dp(12)
         setPadding(pad, dp(10), pad, dp(12))
-        background = GradientDrawable().apply {
+        cardBgDrawable = GradientDrawable().apply {
             cornerRadius = dp(10).toFloat()
             setColor(ThemeColors.CardBg)
             setStroke(dp(1), ThemeColors.CardBorder)
         }
+        background = cardBgDrawable
 
-        // 1. Station Header
+        // 1. Station Header (with Mute speaker icon, Dim crescent moon icon, and connection status)
         val headerRow = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(2), 0, dp(2), dp(8))
         }
 
-        val lblStation = TextView(context).apply {
+        lblStation = TextView(context).apply {
             text = stationTitle
             setTextColor(ThemeColors.TextPrimary)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
@@ -1045,19 +1227,40 @@ class StationCardView(
             layoutParams = LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
-        btnMute = TextView(context).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-            setPadding(dp(8), dp(3), dp(8), dp(3))
-            layoutParams = LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                rightMargin = dp(10)
+        btnMute = HeaderQuickToggleButton(
+            context = context,
+            isMuteButton = true,
+            initialActive = isMuted
+        ) { muted ->
+            isMuted = muted
+            if (!isMuted && MobileChimePlayer.enabled) {
+                MobileChimePlayer.playTimeSingle()
             }
-            setOnClickListener {
-                isMuted = !isMuted
-                updateMuteVisual()
-                onMuteToggled(isMuted)
+            onQuickSettingsChanged(isMuted, isDimmed, showIntervalBg)
+        }.apply {
+            layoutParams = LayoutParams(dp(30), dp(24)).apply {
+                rightMargin = dp(6)
             }
         }
-        updateMuteVisual()
+
+        btnDim = HeaderQuickToggleButton(
+            context = context,
+            isMuteButton = false,
+            initialActive = isDimmed
+        ) { dimmed ->
+            isDimmed = dimmed
+            applyDimVisuals()
+            onQuickSettingsChanged(isMuted, isDimmed, showIntervalBg)
+        }.apply {
+            layoutParams = LayoutParams(dp(30), dp(24)).apply {
+                rightMargin = dp(12)
+            }
+        }
+
+        statusPanel = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
 
         statusDot = View(context).apply {
             background = GradientDrawable().apply {
@@ -1075,16 +1278,23 @@ class StationCardView(
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
         }
 
+        statusPanel.addView(statusDot)
+        statusPanel.addView(statusText)
+
         headerRow.addView(lblStation)
         headerRow.addView(btnMute)
-        headerRow.addView(statusDot)
-        headerRow.addView(statusText)
+        headerRow.addView(btnDim)
+        headerRow.addView(statusPanel)
         addView(headerRow)
 
-        // 2. Time Section
-        val timeDisplayBox = LinearLayout(context).apply {
+        // 2. Content Container (dims to 0.18 opacity when Dim is active, just like PC version)
+        contentContainer = LinearLayout(context).apply {
             orientation = VERTICAL
-            setPadding(dp(12), dp(8), dp(12), dp(10))
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+
+        // --- TIME SECTION ---
+        val timeDisplayBox = FrameLayout(context).apply {
             background = GradientDrawable().apply {
                 cornerRadius = dp(8).toFloat()
                 setColor(ThemeColors.SubCardBg)
@@ -1093,6 +1303,32 @@ class StationCardView(
             layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 bottomMargin = dp(6)
             }
+        }
+
+        // Background Interval Watermark (Opacity 0.20, matching _bgIntervalGrid in PC version)
+        txtBgIntervalValue = TextView(context).apply {
+            text = "--:--"
+            setTextColor(ThemeColors.TextSecondary)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 52f)
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            alpha = 0.20f
+            visibility = if (showIntervalBg) View.VISIBLE else View.GONE
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER
+            )
+        }
+        timeDisplayBox.addView(txtBgIntervalValue)
+
+        val timeInnerCol = LinearLayout(context).apply {
+            orientation = VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(10))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
         }
 
         val timeTopRow = LinearLayout(context).apply {
@@ -1111,6 +1347,11 @@ class StationCardView(
             setTextColor(ThemeColors.TextSecondary)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setOnClickListener {
+                showIntervalBg = !showIntervalBg
+                txtBgIntervalValue.visibility = if (showIntervalBg) View.VISIBLE else View.GONE
+                onQuickSettingsChanged(isMuted, isDimmed, showIntervalBg)
+            }
         }
         timeTopRow.addView(lblTimeHeader)
         timeTopRow.addView(txtSetTimeValue)
@@ -1141,23 +1382,24 @@ class StationCardView(
         timerProgressTrack.addView(timerProgressFill)
         timerProgressTrack.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateProgressBars() }
 
-        timeDisplayBox.addView(timeTopRow)
-        timeDisplayBox.addView(txtTimerValue)
-        timeDisplayBox.addView(timerProgressTrack)
-        addView(timeDisplayBox)
+        timeInnerCol.addView(timeTopRow)
+        timeInnerCol.addView(txtTimerValue)
+        timeInnerCol.addView(timerProgressTrack)
+        timeDisplayBox.addView(timeInnerCol)
+        contentContainer.addView(timeDisplayBox)
 
         // Time Operator Buttons (2 rows x 3 columns)
         val timeBtnRow1 = LinearLayout(context).apply { orientation = HORIZONTAL }
         timeBtnRow1.addView(createActionButton(11, "10 min", ThemeColors.AccentBtnMuted))
         timeBtnRow1.addView(createActionButton(2, "+ 1 min", ThemeColors.AccentEmerald))
         timeBtnRow1.addView(createActionButton(3, "+ 5 min", ThemeColors.AccentEmerald))
-        addView(timeBtnRow1)
+        contentContainer.addView(timeBtnRow1)
 
         val timeBtnRow2 = LinearLayout(context).apply { orientation = HORIZONTAL }
         timeBtnRow2.addView(createActionButton(10, "6 min", ThemeColors.AccentBtnMuted))
         timeBtnRow2.addView(createActionButton(5, "− 1 min", ThemeColors.AccentCoral))
         timeBtnRow2.addView(createActionButton(6, "− 5 min", ThemeColors.AccentCoral))
-        addView(timeBtnRow2)
+        contentContainer.addView(timeBtnRow2)
 
         // Divider between Time and Persons
         val divider = View(context).apply {
@@ -1167,9 +1409,9 @@ class StationCardView(
                 bottomMargin = dp(8)
             }
         }
-        addView(divider)
+        contentContainer.addView(divider)
 
-        // 3. Persons Section
+        // --- PERSONS SECTION ---
         val personsDisplayBox = LinearLayout(context).apply {
             orientation = VERTICAL
             setPadding(dp(12), dp(8), dp(12), dp(10))
@@ -1230,27 +1472,27 @@ class StationCardView(
         personsDisplayBox.addView(lblPersonsHeader)
         personsDisplayBox.addView(personsNumberRow)
         personsDisplayBox.addView(personsProgressTrack)
-        addView(personsDisplayBox)
+        contentContainer.addView(personsDisplayBox)
 
         // Persons Operator Buttons
         val personsBtnRow1 = LinearLayout(context).apply { orientation = HORIZONTAL }
         personsBtnRow1.addView(createActionButton(8, "− 1 oseba", ThemeColors.AccentCoral))
         personsBtnRow1.addView(createActionButton(7, "+ 1 oseba", ThemeColors.AccentEmerald))
-        addView(personsBtnRow1)
+        contentContainer.addView(personsBtnRow1)
 
         val personsBtnRow2 = LinearLayout(context).apply { orientation = HORIZONTAL }
         personsBtnRow2.addView(createActionButton(9, "Ponastavi števec", ThemeColors.AccentBtnMuted))
-        addView(personsBtnRow2)
+        contentContainer.addView(personsBtnRow2)
+
+        addView(contentContainer)
+        applyDimVisuals()
     }
 
-    private fun updateMuteVisual() {
-        btnMute.text = if (isMuted) "Utišano" else "Zvok"
-        btnMute.setTextColor(if (isMuted) ThemeColors.TextMuted else ThemeColors.TextSecondary)
-        btnMute.background = GradientDrawable().apply {
-            cornerRadius = dp(5).toFloat()
-            setColor(if (isMuted) ThemeColors.BtnPressedBg else ThemeColors.BtnBg)
-            setStroke(dp(1), ThemeColors.BtnBorder)
-        }
+    private fun applyDimVisuals() {
+        contentContainer.alpha = if (isDimmed) 0.18f else 1.0f
+        lblStation.alpha = if (isDimmed) 0.38f else 1.0f
+        statusPanel.alpha = if (isDimmed) 0.38f else 1.0f
+        cardBgDrawable.setColor(if (isDimmed) ThemeColors.SubCardBg else ThemeColors.CardBg)
     }
 
     private fun createActionButton(commandId: Int, label: String, accentColor: Int): View {
@@ -1364,6 +1606,7 @@ class StationCardView(
 
         txtTimerValue.text = "--:--"
         txtTimerValue.setTextColor(ThemeColors.TextMuted)
+        txtBgIntervalValue.text = "--:--"
         txtPersonsCurrent.text = "--"
         txtPersonsCurrent.setTextColor(ThemeColors.TextMuted)
         txtPersonsMax.text = " / --"
@@ -1377,6 +1620,7 @@ class StationCardView(
         val formattedInterval = formatMinSec(setMs)
         txtTimerValue.text = formattedTime
         txtSetTimeValue.text = "Interval: $formattedInterval"
+        txtBgIntervalValue.text = formattedInterval
 
         val timeZone: Int
         when {
