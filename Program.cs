@@ -2,6 +2,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Media;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -22,8 +23,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Nadzorna plošča vzpenjače — Zgornja in spodnja postaja")]
 [assembly: AssemblyCompany("Vzpenjača")]
 [assembly: AssemblyProduct("Vzpenjača")]
-[assembly: AssemblyVersion("2.2.0.0")]
-[assembly: AssemblyFileVersion("2.2.0.0")]
+[assembly: AssemblyVersion("2.3.0.0")]
+[assembly: AssemblyFileVersion("2.3.0.0")]
 
 namespace VzpenjacaKontrola
 {
@@ -51,6 +52,7 @@ namespace VzpenjacaKontrola
         public double WindowTop = double.NaN;
         public double CounterScale = 1.0;
         public bool HideWindowControls = false;
+        public bool SoundEnabled = true;
 
         private static string ConfigPath
         {
@@ -120,6 +122,10 @@ namespace VzpenjacaKontrola
                         {
                             cfg.HideWindowControls = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
                         }
+                        else if (key.Equals("SoundEnabled", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.SoundEnabled = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
                     }
                 }
             }
@@ -146,6 +152,7 @@ namespace VzpenjacaKontrola
                     sb.AppendLine("WindowTop=" + WindowTop.ToString("0", CultureInfo.InvariantCulture));
                 sb.AppendLine("CounterScale=" + CounterScale.ToString("0.00", CultureInfo.InvariantCulture));
                 sb.AppendLine("HideWindowControls=" + (HideWindowControls ? "true" : "false"));
+                sb.AppendLine("SoundEnabled=" + (SoundEnabled ? "true" : "false"));
                 File.WriteAllText(ConfigPath, sb.ToString(), Encoding.UTF8);
             }
             catch { }
@@ -304,6 +311,142 @@ namespace VzpenjacaKontrola
                 SetTimeMs = Math.Max(0, setTimeMs),
                 StationType = stationType
             };
+        }
+    }
+
+    internal static class ChimePlayer
+    {
+        public static bool Enabled = true;
+
+        private static readonly byte[] _wavTimeSingle;
+        private static readonly byte[] _wavTimeTriple;
+        private static readonly byte[] _wavPersonsSingle;
+        private static readonly byte[] _wavPersonsTriple;
+        private static readonly object _playLock = new object();
+
+        static ChimePlayer()
+        {
+            // Time chimes: High, bright crystal bell timbre
+            _wavTimeSingle = BuildChimeWav(new double[] { 932.33 }, 0.42, 0.0, true);
+            _wavTimeTriple = BuildChimeWav(new double[] { 1046.50, 1046.50, 1318.51 }, 0.17, 0.045, true);
+
+            // Persons chimes: Warm lower-mid fifth-chord timbre (distinct from time chimes)
+            _wavPersonsSingle = BuildChimeWav(new double[] { 523.25 }, 0.42, 0.0, false);
+            _wavPersonsTriple = BuildChimeWav(new double[] { 587.33, 587.33, 783.99 }, 0.18, 0.045, false);
+        }
+
+        public static void PlayTimeSingle()
+        {
+            PlayWavBuffer(_wavTimeSingle);
+        }
+
+        public static void PlayTimeTriple()
+        {
+            PlayWavBuffer(_wavTimeTriple);
+        }
+
+        public static void PlayPersonsSingle()
+        {
+            PlayWavBuffer(_wavPersonsSingle);
+        }
+
+        public static void PlayPersonsTriple()
+        {
+            PlayWavBuffer(_wavPersonsTriple);
+        }
+
+        private static void PlayWavBuffer(byte[] wavBytes)
+        {
+            if (!Enabled || wavBytes == null) return;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    lock (_playLock)
+                    {
+                        using (MemoryStream ms = new MemoryStream(wavBytes, false))
+                        using (SoundPlayer player = new SoundPlayer(ms))
+                        {
+                            player.PlaySync();
+                        }
+                    }
+                }
+                catch { }
+            });
+        }
+
+        private static byte[] BuildChimeWav(double[] frequencies, double noteDurationSec, double gapSec, bool brightBellTimbre)
+        {
+            const int sampleRate = 44100;
+            int noteSamples = (int)(sampleRate * noteDurationSec);
+            int gapSamples = (int)(sampleRate * gapSec);
+            int tailSamples = (int)(sampleRate * 0.06);
+            int totalSamples = frequencies.Length * noteSamples + Math.Max(0, frequencies.Length - 1) * gapSamples + tailSamples;
+
+            short[] pcm = new short[totalSamples];
+
+            for (int n = 0; n < frequencies.Length; n++)
+            {
+                double freq = frequencies[n];
+                int startIdx = n * (noteSamples + gapSamples);
+                int renderLen = Math.Min(noteSamples + tailSamples, totalSamples - startIdx);
+
+                for (int i = 0; i < renderLen; i++)
+                {
+                    double t = (double)i / sampleRate;
+                    // Smooth 6ms attack to prevent any click
+                    double attack = (t < 0.006) ? (t / 0.006) : 1.0;
+                    double sample;
+
+                    if (brightBellTimbre)
+                    {
+                        double env1 = Math.Exp(-t * 7.5);
+                        double env2 = Math.Exp(-t * 14.0);
+                        double env3 = Math.Exp(-t * 22.0);
+                        sample = 0.65 * env1 * Math.Sin(2.0 * Math.PI * freq * t)
+                               + 0.25 * env2 * Math.Sin(2.0 * Math.PI * (freq * 2.0) * t)
+                               + 0.10 * env3 * Math.Sin(2.0 * Math.PI * (freq * 3.0) * t);
+                    }
+                    else
+                    {
+                        double env1 = Math.Exp(-t * 6.8);
+                        double env2 = Math.Exp(-t * 11.0);
+                        sample = 0.62 * env1 * Math.Sin(2.0 * Math.PI * freq * t)
+                               + 0.30 * env2 * Math.Sin(2.0 * Math.PI * (freq * 1.4983) * t)
+                               + 0.08 * env2 * Math.Sin(2.0 * Math.PI * (freq * 0.5) * t);
+                    }
+
+                    double val = attack * sample * 21000.0;
+                    int mixed = pcm[startIdx + i] + (int)val;
+                    if (mixed > 32000) mixed = 32000;
+                    else if (mixed < -32000) mixed = -32000;
+                    pcm[startIdx + i] = (short)mixed;
+                }
+            }
+
+            int dataBytes = totalSamples * 2;
+            using (MemoryStream ms = new MemoryStream(44 + dataBytes))
+            using (BinaryWriter bw = new BinaryWriter(ms))
+            {
+                bw.Write(Encoding.ASCII.GetBytes("RIFF"));
+                bw.Write(36 + dataBytes);
+                bw.Write(Encoding.ASCII.GetBytes("WAVE"));
+                bw.Write(Encoding.ASCII.GetBytes("fmt "));
+                bw.Write(16);
+                bw.Write((short)1); // PCM
+                bw.Write((short)1); // Mono
+                bw.Write(sampleRate);
+                bw.Write(sampleRate * 2);
+                bw.Write((short)2);
+                bw.Write((short)16);
+                bw.Write(Encoding.ASCII.GetBytes("data"));
+                bw.Write(dataBytes);
+                for (int i = 0; i < totalSamples; i++)
+                {
+                    bw.Write(pcm[i]);
+                }
+                return ms.ToArray();
+            }
         }
     }
 
@@ -569,6 +712,9 @@ namespace VzpenjacaKontrola
         private bool _isCommandBusy = false;
         private double _currentScale = 1.0;
         private bool _isNarrowLayout = false;
+        private bool _hasInitialTelemetry = false;
+        private int _lastTimeZone = -1;
+        private int _lastPersonsZone = -1;
 
         public StationCardControl(string stationName, string ipAddress, double initialScale = 1.0)
         {
@@ -1044,6 +1190,7 @@ namespace VzpenjacaKontrola
 
         private void ApplyTelemetry(StationTelemetry t, bool forceSyncTime)
         {
+            bool isFirstLoad = !_hasInitialTelemetry;
             bool wasOffline = !_isOnline;
             _isOnline = true;
 
@@ -1060,8 +1207,9 @@ namespace VzpenjacaKontrola
             _currentPersons = t.CurrentPersons;
             _maxPersons = t.MaxPersons;
 
-            RenderTime();
-            RenderPersons();
+            RenderTime(isFirstLoad);
+            RenderPersons(isFirstLoad);
+            _hasInitialTelemetry = true;
         }
 
         private void SetOfflineState()
@@ -1080,7 +1228,7 @@ namespace VzpenjacaKontrola
             _personsProgressFill.Width = 0;
         }
 
-        private void RenderTime()
+        private void RenderTime(bool suppressChime = false)
         {
             if (!_isOnline) return;
 
@@ -1088,47 +1236,73 @@ namespace VzpenjacaKontrola
             _txtTimerValue.Text = formattedTime;
             _txtSetTimeValue.Text = "Interval: " + FormatMinSec(_setMs);
 
+            int timeZone;
             if (_remainingMs <= 0 || formattedTime == "00:00")
             {
+                timeZone = 2;
                 _txtTimerValue.Foreground = ThemePalette.AccentRed;
                 _timerProgressFill.Background = ThemePalette.AccentRed;
             }
             else if (_remainingMs <= 60000)
             {
+                timeZone = 1;
                 _txtTimerValue.Foreground = ThemePalette.AccentAmber;
                 _timerProgressFill.Background = ThemePalette.AccentAmber;
             }
             else
             {
+                timeZone = 0;
                 _txtTimerValue.Foreground = ThemePalette.TextPrimary;
                 _timerProgressFill.Background = ThemePalette.AccentBlue;
             }
 
+            if (!suppressChime && _lastTimeZone >= 0 && timeZone > _lastTimeZone)
+            {
+                if (timeZone == 1)
+                    ChimePlayer.PlayTimeSingle();
+                else if (timeZone == 2)
+                    ChimePlayer.PlayTimeTriple();
+            }
+            _lastTimeZone = timeZone;
+
             UpdateProgressBars();
         }
 
-        private void RenderPersons()
+        private void RenderPersons(bool suppressChime = false)
         {
             if (!_isOnline) return;
 
             _txtPersonsCurrent.Text = _currentPersons.ToString("00", CultureInfo.InvariantCulture);
             _txtPersonsMax.Text = " / " + _maxPersons.ToString("00", CultureInfo.InvariantCulture);
 
+            int personsZone;
             if (_maxPersons > 0 && _currentPersons >= _maxPersons)
             {
+                personsZone = 2;
                 _txtPersonsCurrent.Foreground = ThemePalette.AccentCoral;
                 _personsProgressFill.Background = ThemePalette.AccentCoral;
             }
             else if (_maxPersons > 0 && (double)_currentPersons / _maxPersons >= 0.85)
             {
+                personsZone = 1;
                 _txtPersonsCurrent.Foreground = ThemePalette.AccentAmber;
                 _personsProgressFill.Background = ThemePalette.AccentAmber;
             }
             else
             {
+                personsZone = 0;
                 _txtPersonsCurrent.Foreground = ThemePalette.TextPrimary;
                 _personsProgressFill.Background = ThemePalette.AccentEmerald;
             }
+
+            if (!suppressChime && _lastPersonsZone >= 0 && personsZone > _lastPersonsZone)
+            {
+                if (personsZone == 1)
+                    ChimePlayer.PlayPersonsSingle();
+                else if (personsZone == 2)
+                    ChimePlayer.PlayPersonsTriple();
+            }
+            _lastPersonsZone = personsZone;
 
             UpdateProgressBars();
         }
@@ -1173,6 +1347,7 @@ namespace VzpenjacaKontrola
         private const uint SC_CLOSE = 0xF060;
         private const int IDM_ALWAYS_ON_TOP = 0x1001;
         private const int IDM_START_WITH_WINDOWS = 0x1002;
+        private const int IDM_SOUND_ENABLED = 0x1003;
         private const int IDM_ZOOM_IN = 0x1010;
         private const int IDM_ZOOM_OUT = 0x1011;
         private const int IDM_ZOOM_RESET = 0x1012;
@@ -1197,6 +1372,7 @@ namespace VzpenjacaKontrola
         {
             _config = AppConfig.Load();
             AppConfig.ApplyAutostart(_config.StartWithWindows);
+            ChimePlayer.Enabled = _config.SoundEnabled;
 
             Title = "Vzpenjača";
             Width = _config.WindowWidth;
@@ -1386,8 +1562,10 @@ namespace VzpenjacaKontrola
             {
                 uint topFlag = _config.AlwaysOnTop ? MF_CHECKED : MF_UNCHECKED;
                 uint autostartFlag = _config.StartWithWindows ? MF_CHECKED : MF_UNCHECKED;
+                uint soundFlag = _config.SoundEnabled ? MF_CHECKED : MF_UNCHECKED;
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | topFlag, (UIntPtr)IDM_ALWAYS_ON_TOP, "Vedno na vrhu");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | autostartFlag, (UIntPtr)IDM_START_WITH_WINDOWS, "Zaženi ob zagonu računalnika");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | soundFlag, (UIntPtr)IDM_SOUND_ENABLED, "Zvočna opozorila");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_TOGGLE_CONTROLS, "Preklopi kontrole okna\t(F11)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_IN, "Povečaj števce\t(Ctrl +)");
@@ -1423,6 +1601,22 @@ namespace VzpenjacaKontrola
                     if (_hSysMenu != IntPtr.Zero)
                     {
                         CheckMenuItem(_hSysMenu, IDM_START_WITH_WINDOWS, MF_BYCOMMAND | (_config.StartWithWindows ? MF_CHECKED : MF_UNCHECKED));
+                    }
+                    handled = true;
+                }
+                else if (cmd == IDM_SOUND_ENABLED)
+                {
+                    _config.SoundEnabled = !_config.SoundEnabled;
+                    ChimePlayer.Enabled = _config.SoundEnabled;
+                    _config.Save();
+
+                    if (_hSysMenu != IntPtr.Zero)
+                    {
+                        CheckMenuItem(_hSysMenu, IDM_SOUND_ENABLED, MF_BYCOMMAND | (_config.SoundEnabled ? MF_CHECKED : MF_UNCHECKED));
+                    }
+                    if (_config.SoundEnabled)
+                    {
+                        ChimePlayer.PlayTimeSingle();
                     }
                     handled = true;
                 }
