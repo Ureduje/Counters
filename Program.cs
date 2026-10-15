@@ -842,7 +842,7 @@ namespace VzpenjacaKontrola
             AddButtonToGrid(personsButtonsGrid, new ModernActionButton(8, "− 1 oseba", ThemePalette.AccentCoral, 14.5), 0, 0);
             AddButtonToGrid(personsButtonsGrid, new ModernActionButton(7, "+ 1 oseba", ThemePalette.AccentEmerald, 14.5), 0, 1);
 
-            ModernActionButton btnReset = new ModernActionButton(9, "Ponastavi števec", ThemePalette.AccentBlue, 14.0);
+            ModernActionButton btnReset = new ModernActionButton(9, "Ponastavi na 28", ThemePalette.AccentBlue, 14.0);
             btnReset.Clicked += async (btn) => await ExecuteCommandAsync(btn.CommandId);
             Grid.SetRow(btnReset, 1);
             Grid.SetColumn(btnReset, 0);
@@ -897,12 +897,6 @@ namespace VzpenjacaKontrola
             _txtTimerValue.FontSize = Math.Max(26, Math.Round(46 * _currentScale));
             _txtPersonsCurrent.FontSize = Math.Max(26, Math.Round(46 * _currentScale));
             _txtPersonsMax.FontSize = Math.Max(14, Math.Round(24 * _currentScale));
-
-            if (_timeSection.RowDefinitions.Count >= 2)
-                _timeSection.RowDefinitions[0].Height = new GridLength(1.1 * _currentScale, GridUnitType.Star);
-            if (_personsSection.RowDefinitions.Count >= 2)
-                _personsSection.RowDefinitions[0].Height = new GridLength(1.1 * _currentScale, GridUnitType.Star);
-
             UpdateProgressBars();
         }
 
@@ -956,9 +950,9 @@ namespace VzpenjacaKontrola
             }
 
             if (_timeSection.RowDefinitions.Count >= 2)
-                _timeSection.RowDefinitions[0].Height = new GridLength(1.1 * _currentScale, GridUnitType.Star);
+                _timeSection.RowDefinitions[0].Height = new GridLength(1.1, GridUnitType.Star);
             if (_personsSection.RowDefinitions.Count >= 2)
-                _personsSection.RowDefinitions[0].Height = new GridLength(1.1 * _currentScale, GridUnitType.Star);
+                _personsSection.RowDefinitions[0].Height = new GridLength(1.1, GridUnitType.Star);
         }
 
         private void AddButtonToGrid(Grid grid, ModernActionButton btn, int row, int col)
@@ -976,6 +970,17 @@ namespace VzpenjacaKontrola
             try
             {
                 StationTelemetry t = await Client.SendOperatorCommandAsync(commandId, 1800);
+                if (commandId == 9)
+                {
+                    int target = (t.MaxPersons > 0) ? t.MaxPersons : 28;
+                    int attempts = 0;
+                    while (t.CurrentPersons != target && attempts < 30)
+                    {
+                        attempts++;
+                        int adjCmd = (t.CurrentPersons < target) ? 7 : 8;
+                        t = await Client.SendOperatorCommandAsync(adjCmd, 1200);
+                    }
+                }
                 ApplyTelemetry(t, true);
             }
             catch
