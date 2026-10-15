@@ -54,6 +54,7 @@ namespace VzpenjacaKontrola
         public double CounterScale = 1.0;
         public bool HideWindowControls = false;
         public bool SoundEnabled = true;
+        public bool VoiceAnnouncementEnabled = true;
         public bool MuteZgoraj = false;
         public bool MuteSpodaj = false;
         public bool DimZgoraj = false;
@@ -133,6 +134,10 @@ namespace VzpenjacaKontrola
                         {
                             cfg.SoundEnabled = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
                         }
+                        else if (key.Equals("VoiceAnnouncementEnabled", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.VoiceAnnouncementEnabled = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
                         else if (key.Equals("MuteZgoraj", StringComparison.OrdinalIgnoreCase))
                         {
                             cfg.MuteZgoraj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
@@ -184,6 +189,7 @@ namespace VzpenjacaKontrola
                 sb.AppendLine("CounterScale=" + CounterScale.ToString("0.00", CultureInfo.InvariantCulture));
                 sb.AppendLine("HideWindowControls=" + (HideWindowControls ? "true" : "false"));
                 sb.AppendLine("SoundEnabled=" + (SoundEnabled ? "true" : "false"));
+                sb.AppendLine("VoiceAnnouncementEnabled=" + (VoiceAnnouncementEnabled ? "true" : "false"));
                 sb.AppendLine("MuteZgoraj=" + (MuteZgoraj ? "true" : "false"));
                 sb.AppendLine("MuteSpodaj=" + (MuteSpodaj ? "true" : "false"));
                 sb.AppendLine("DimZgoraj=" + (DimZgoraj ? "true" : "false"));
@@ -354,12 +360,14 @@ namespace VzpenjacaKontrola
     internal static class ChimePlayer
     {
         public static bool Enabled = true;
+        public static bool VoiceEnabled = true;
 
         private static readonly byte[] _wavTimeSingle;
         private static readonly byte[] _wavTimeTriple;
         private static readonly byte[] _wavPersonsSingle;
         private static readonly byte[] _wavPersonsTriple;
         private static readonly object _playLock = new object();
+        private static DateTime _lastDepartureSpeechUtc = DateTime.MinValue;
 
         static ChimePlayer()
         {
@@ -390,6 +398,90 @@ namespace VzpenjacaKontrola
         public static void PlayPersonsTriple()
         {
             PlayWavBuffer(_wavPersonsTriple);
+        }
+
+        public static void SpeakDeparture(int minutes)
+        {
+            if (!VoiceEnabled) return;
+            DateTime now = DateTime.UtcNow;
+            if ((now - _lastDepartureSpeechUtc).TotalSeconds < 4.0) return;
+            _lastDepartureSpeechUtc = now;
+
+            if (minutes <= 0) minutes = 1;
+            string text = "Vzpenjača je odpeljala. Naslednja vožnja je čez " + minutes.ToString(CultureInfo.InvariantCulture) + " minut.";
+
+            Thread t = new Thread(() =>
+            {
+                try
+                {
+                    lock (_playLock)
+                    {
+                        Type voiceType = Type.GetTypeFromProgID("SAPI.SpVoice");
+                        if (voiceType == null) return;
+                        object voice = Activator.CreateInstance(voiceType);
+                        string tokenKey = FindSlovenianVoiceTokenPath();
+                        if (!string.IsNullOrEmpty(tokenKey))
+                        {
+                            try
+                            {
+                                Type tokenType = Type.GetTypeFromProgID("SAPI.SpObjectToken");
+                                if (tokenType != null)
+                                {
+                                    object token = Activator.CreateInstance(tokenType);
+                                    tokenType.InvokeMember("SetId", BindingFlags.InvokeMethod, null, token, new object[] { tokenKey });
+                                    voiceType.InvokeMember("Voice", BindingFlags.SetProperty, null, voice, new object[] { token });
+                                }
+                            }
+                            catch { }
+                        }
+                        voiceType.InvokeMember("Speak", BindingFlags.InvokeMethod, null, voice, new object[] { text, 0 });
+                    }
+                }
+                catch { }
+            });
+            t.IsBackground = true;
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+        }
+
+        private static string FindSlovenianVoiceTokenPath()
+        {
+            string[] roots = new string[]
+            {
+                @"SOFTWARE\Microsoft\Speech_OneCore\Voices\Tokens",
+                @"SOFTWARE\Microsoft\Speech\Voices\Tokens"
+            };
+            foreach (string root in roots)
+            {
+                try
+                {
+                    using (RegistryKey rk = Registry.LocalMachine.OpenSubKey(root))
+                    {
+                        if (rk == null) continue;
+                        foreach (string sub in rk.GetSubKeyNames())
+                        {
+                            if (sub.IndexOf("slSI", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                sub.IndexOf("Lado", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                return @"HKEY_LOCAL_MACHINE\" + root + @"\" + sub;
+                            }
+                            using (RegistryKey attr = rk.OpenSubKey(sub + @"\Attributes"))
+                            {
+                                if (attr != null)
+                                {
+                                    string lang = Convert.ToString(attr.GetValue("Language"));
+                                    if (lang == "424" || lang == "0424")
+                                    {
+                                        return @"HKEY_LOCAL_MACHINE\" + root + @"\" + sub;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+            return null;
         }
 
         private static void PlayWavBuffer(byte[] wavBytes)
@@ -1460,6 +1552,10 @@ namespace VzpenjacaKontrola
             _statusText.Text = "Povezano";
             _statusText.Foreground = ThemePalette.TextSecondary;
 
+            long prevRemainingMs = _remainingMs;
+            long prevSetMs = _setMs;
+            int prevPersons = _currentPersons;
+
             _setMs = t.SetTimeMs;
             if (forceSyncTime || wasOffline || Math.Abs(t.RemainingTimeMs - _remainingMs) > 2000)
             {
@@ -1468,6 +1564,20 @@ namespace VzpenjacaKontrola
 
             _currentPersons = t.CurrentPersons;
             _maxPersons = t.MaxPersons;
+
+            if (!isFirstLoad && !wasOffline && !forceSyncTime && !_isCommandBusy)
+            {
+                bool clockReset = (t.SetTimeMs > 0) &&
+                                  (t.SetTimeMs == prevSetMs) &&
+                                  (t.RemainingTimeMs - prevRemainingMs > 15000) &&
+                                  (t.RemainingTimeMs >= t.SetTimeMs - 20000);
+                if (clockReset && (t.CurrentPersons == 0 || t.CurrentPersons < prevPersons) && !_isMuted)
+                {
+                    int nextMinutes = (int)((t.SetTimeMs + 30000) / 60000);
+                    if (nextMinutes <= 0) nextMinutes = 1;
+                    ChimePlayer.SpeakDeparture(nextMinutes);
+                }
+            }
 
             RenderTime(isFirstLoad);
             RenderPersons(isFirstLoad);
@@ -1615,6 +1725,7 @@ namespace VzpenjacaKontrola
         private const int IDM_ALWAYS_ON_TOP = 0x1001;
         private const int IDM_START_WITH_WINDOWS = 0x1002;
         private const int IDM_SOUND_ENABLED = 0x1003;
+        private const int IDM_VOICE_ENABLED = 0x1004;
         private const int IDM_ZOOM_IN = 0x1010;
         private const int IDM_ZOOM_OUT = 0x1011;
         private const int IDM_ZOOM_RESET = 0x1012;
@@ -1651,6 +1762,7 @@ namespace VzpenjacaKontrola
             _config = AppConfig.Load();
             AppConfig.ApplyAutostart(_config.StartWithWindows);
             ChimePlayer.Enabled = _config.SoundEnabled;
+            ChimePlayer.VoiceEnabled = _config.VoiceAnnouncementEnabled;
 
             Title = "Vzpenjača";
             Width = _config.WindowWidth;
@@ -1896,9 +2008,11 @@ namespace VzpenjacaKontrola
                 uint topFlag = _config.AlwaysOnTop ? MF_CHECKED : MF_UNCHECKED;
                 uint autostartFlag = _config.StartWithWindows ? MF_CHECKED : MF_UNCHECKED;
                 uint soundFlag = _config.SoundEnabled ? MF_CHECKED : MF_UNCHECKED;
+                uint voiceFlag = _config.VoiceAnnouncementEnabled ? MF_CHECKED : MF_UNCHECKED;
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | topFlag, (UIntPtr)IDM_ALWAYS_ON_TOP, "Vedno na vrhu");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | autostartFlag, (UIntPtr)IDM_START_WITH_WINDOWS, "Zaženi ob zagonu računalnika");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | soundFlag, (UIntPtr)IDM_SOUND_ENABLED, "Zvočna opozorila");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | voiceFlag, (UIntPtr)IDM_VOICE_ENABLED, "Glasovno obvestilo ob odhodu");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_TOGGLE_CONTROLS, "Preklopi kontrole okna\t(F11)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_IN, "Povečaj števce\t(Ctrl +)");
@@ -1952,6 +2066,18 @@ namespace VzpenjacaKontrola
                     if (_config.SoundEnabled)
                     {
                         ChimePlayer.PlayTimeSingle();
+                    }
+                    handled = true;
+                }
+                else if (cmd == IDM_VOICE_ENABLED)
+                {
+                    _config.VoiceAnnouncementEnabled = !_config.VoiceAnnouncementEnabled;
+                    ChimePlayer.VoiceEnabled = _config.VoiceAnnouncementEnabled;
+                    _config.Save();
+
+                    if (_hSysMenu != IntPtr.Zero)
+                    {
+                        CheckMenuItem(_hSysMenu, IDM_VOICE_ENABLED, MF_BYCOMMAND | (_config.VoiceAnnouncementEnabled ? MF_CHECKED : MF_UNCHECKED));
                     }
                     handled = true;
                 }
