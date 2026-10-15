@@ -53,6 +53,10 @@ namespace VzpenjacaKontrola
         public double CounterScale = 1.0;
         public bool HideWindowControls = false;
         public bool SoundEnabled = true;
+        public bool MuteZgoraj = false;
+        public bool MuteSpodaj = false;
+        public bool DimZgoraj = false;
+        public bool DimSpodaj = false;
 
         private static string ConfigPath
         {
@@ -126,6 +130,22 @@ namespace VzpenjacaKontrola
                         {
                             cfg.SoundEnabled = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
                         }
+                        else if (key.Equals("MuteZgoraj", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.MuteZgoraj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
+                        else if (key.Equals("MuteSpodaj", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.MuteSpodaj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
+                        else if (key.Equals("DimZgoraj", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.DimZgoraj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
+                        else if (key.Equals("DimSpodaj", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.DimSpodaj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
                     }
                 }
             }
@@ -153,6 +173,10 @@ namespace VzpenjacaKontrola
                 sb.AppendLine("CounterScale=" + CounterScale.ToString("0.00", CultureInfo.InvariantCulture));
                 sb.AppendLine("HideWindowControls=" + (HideWindowControls ? "true" : "false"));
                 sb.AppendLine("SoundEnabled=" + (SoundEnabled ? "true" : "false"));
+                sb.AppendLine("MuteZgoraj=" + (MuteZgoraj ? "true" : "false"));
+                sb.AppendLine("MuteSpodaj=" + (MuteSpodaj ? "true" : "false"));
+                sb.AppendLine("DimZgoraj=" + (DimZgoraj ? "true" : "false"));
+                sb.AppendLine("DimSpodaj=" + (DimSpodaj ? "true" : "false"));
                 File.WriteAllText(ConfigPath, sb.ToString(), Encoding.UTF8);
             }
             catch { }
@@ -588,68 +612,80 @@ namespace VzpenjacaKontrola
     }
 
     /// <summary>
-    /// Sleek toggle pill button for pinning the window on top.
+    /// Compact icon toggle pill button for station header quick settings (Mute chimes / Dim view).
     /// </summary>
-    public class PinToggleButton : Border
+    public class HeaderQuickToggleButton : Border
     {
-        private bool _isPinned;
+        private bool _isActive;
         private bool _isHovered;
-        private readonly Ellipse _dot;
-        private readonly TextBlock _text;
+        private readonly bool _isMuteButton;
+        private readonly System.Windows.Shapes.Path _iconPath;
+        private readonly string _tooltipActive;
+        private readonly string _tooltipInactive;
 
-        public event Action<bool> PinChanged;
+        private static readonly Geometry GeomSpeakerOn = Geometry.Parse(
+            "M 2,6 L 5,6 L 8.8,2.6 L 8.8,13.4 L 5,10 L 2,10 Z M 11.2,5.2 A 3.6,3.6 0 0 1 11.2,10.8 M 13.0,3.4 A 6.0,6.0 0 0 1 13.0,12.6");
+        private static readonly Geometry GeomSpeakerMuted = Geometry.Parse(
+            "M 2,6 L 5,6 L 8.8,2.6 L 8.8,13.4 L 5,10 L 2,10 Z M 11.2,5.5 L 15.0,10.5 M 15.0,5.5 L 11.2,10.5");
+        private static readonly Geometry GeomDimMoon = Geometry.Parse(
+            "M 10.6,2.4 A 5.5,5.5 0 1 0 13.6,10.4 A 4.4,4.4 0 0 1 10.6,2.4 Z");
 
-        public bool IsPinned
+        public event Action<bool> Toggled;
+
+        public bool IsActive
         {
-            get { return _isPinned; }
+            get { return _isActive; }
             set
             {
-                _isPinned = value;
+                _isActive = value;
                 UpdateVisuals();
             }
         }
 
-        public PinToggleButton(bool initialPinned)
+        public HeaderQuickToggleButton(bool isMuteButton, bool initialActive, string tooltipInactive, string tooltipActive)
         {
-            _isPinned = initialPinned;
-            CornerRadius = new CornerRadius(6);
+            _isMuteButton = isMuteButton;
+            _isActive = initialActive;
+            _tooltipInactive = tooltipInactive;
+            _tooltipActive = tooltipActive;
+
+            Width = 28;
+            Height = 22;
+            CornerRadius = new CornerRadius(5);
             BorderThickness = new Thickness(1);
-            Padding = new Thickness(10, 4, 10, 4);
             Cursor = Cursors.Hand;
             SnapsToDevicePixels = true;
+            VerticalAlignment = VerticalAlignment.Center;
 
-            StackPanel sp = new StackPanel
+            Canvas iconCanvas = new Canvas
             {
-                Orientation = Orientation.Horizontal,
+                Width = 16,
+                Height = 16,
+                HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center
             };
 
-            _dot = new Ellipse
+            _iconPath = new System.Windows.Shapes.Path
             {
-                Width = 7,
-                Height = 7,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 6, 0)
+                StrokeThickness = 1.5,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                StrokeLineJoin = PenLineJoin.Round
             };
 
-            _text = new TextBlock
-            {
-                Text = "Vedno na vrhu",
-                FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
-                FontSize = 11.5,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-
-            sp.Children.Add(_dot);
-            sp.Children.Add(_text);
-            Child = sp;
+            iconCanvas.Children.Add(_iconPath);
+            Child = iconCanvas;
 
             MouseEnter += (s, e) => { _isHovered = true; UpdateVisuals(); };
             MouseLeave += (s, e) => { _isHovered = false; UpdateVisuals(); };
+            MouseLeftButtonDown += (s, e) =>
+            {
+                e.Handled = true;
+            };
             MouseLeftButtonUp += (s, e) =>
             {
-                IsPinned = !IsPinned;
-                if (PinChanged != null) PinChanged(_isPinned);
+                IsActive = !IsActive;
+                if (Toggled != null) Toggled(_isActive);
                 e.Handled = true;
             };
 
@@ -658,19 +694,39 @@ namespace VzpenjacaKontrola
 
         private void UpdateVisuals()
         {
-            if (_isPinned)
+            ToolTip = _isActive ? _tooltipActive : _tooltipInactive;
+
+            if (_isMuteButton)
             {
-                Background = ThemePalette.AccentBlueActiveBg;
-                BorderBrush = ThemePalette.AccentBlue;
-                _dot.Fill = ThemePalette.AccentBlue;
-                _text.Foreground = ThemePalette.TextPrimary;
+                _iconPath.Data = _isActive ? GeomSpeakerMuted : GeomSpeakerOn;
+                if (_isActive)
+                {
+                    Background = ThemePalette.BtnPressedBg;
+                    BorderBrush = ThemePalette.AccentCoral;
+                    _iconPath.Stroke = ThemePalette.AccentCoral;
+                }
+                else
+                {
+                    Background = _isHovered ? ThemePalette.BtnHoverBg : ThemePalette.BtnBg;
+                    BorderBrush = _isHovered ? ThemePalette.BtnHoverBorder : ThemePalette.BtnBorder;
+                    _iconPath.Stroke = _isHovered ? ThemePalette.TextPrimary : ThemePalette.TextSecondary;
+                }
             }
             else
             {
-                Background = _isHovered ? ThemePalette.BtnHoverBg : ThemePalette.CardBg;
-                BorderBrush = _isHovered ? ThemePalette.BtnHoverBorder : ThemePalette.CardBorder;
-                _dot.Fill = ThemePalette.TextMuted;
-                _text.Foreground = ThemePalette.TextSecondary;
+                _iconPath.Data = GeomDimMoon;
+                if (_isActive)
+                {
+                    Background = ThemePalette.AccentBlueActiveBg;
+                    BorderBrush = ThemePalette.AccentBlue;
+                    _iconPath.Stroke = ThemePalette.AccentBlue;
+                }
+                else
+                {
+                    Background = _isHovered ? ThemePalette.BtnHoverBg : ThemePalette.BtnBg;
+                    BorderBrush = _isHovered ? ThemePalette.BtnHoverBorder : ThemePalette.BtnBorder;
+                    _iconPath.Stroke = _isHovered ? ThemePalette.TextPrimary : ThemePalette.TextSecondary;
+                }
             }
         }
     }
@@ -681,9 +737,14 @@ namespace VzpenjacaKontrola
     public class StationCardControl : Border
     {
         public FunicularClient Client { get; private set; }
+        public event Action QuickSettingsChanged;
 
+        private readonly TextBlock _lblStation;
+        private readonly StackPanel _statusPanel;
         private readonly Ellipse _statusDot;
         private readonly TextBlock _statusText;
+        private readonly HeaderQuickToggleButton _btnMute;
+        private readonly HeaderQuickToggleButton _btnDim;
 
         private readonly Grid _contentGrid;
         private readonly Grid _timeSection;
@@ -715,11 +776,38 @@ namespace VzpenjacaKontrola
         private bool _hasInitialTelemetry = false;
         private int _lastTimeZone = -1;
         private int _lastPersonsZone = -1;
+        private bool _isMuted = false;
+        private bool _isDimmed = false;
 
-        public StationCardControl(string stationName, string ipAddress, double initialScale = 1.0)
+        public bool IsMuted
+        {
+            get { return _isMuted; }
+            set
+            {
+                _isMuted = value;
+                if (_btnMute != null && _btnMute.IsActive != value)
+                    _btnMute.IsActive = value;
+            }
+        }
+
+        public bool IsDimmed
+        {
+            get { return _isDimmed; }
+            set
+            {
+                _isDimmed = value;
+                if (_btnDim != null && _btnDim.IsActive != value)
+                    _btnDim.IsActive = value;
+                ApplyDimVisuals();
+            }
+        }
+
+        public StationCardControl(string stationName, string ipAddress, double initialScale = 1.0, bool initialMuted = false, bool initialDimmed = false)
         {
             Client = new FunicularClient(ipAddress, 80);
             _currentScale = Math.Max(0.65, Math.Min(1.90, initialScale));
+            _isMuted = initialMuted;
+            _isDimmed = initialDimmed;
 
             Background = ThemePalette.CardBg;
             BorderBrush = ThemePalette.CardBorder;
@@ -735,7 +823,7 @@ namespace VzpenjacaKontrola
             // 1. Minimal Station Header
             Grid headerGrid = new Grid { Margin = new Thickness(2, 0, 2, 4) };
 
-            TextBlock lblStation = new TextBlock
+            _lblStation = new TextBlock
             {
                 Text = stationName,
                 Foreground = ThemePalette.TextPrimary,
@@ -745,10 +833,49 @@ namespace VzpenjacaKontrola
                 VerticalAlignment = VerticalAlignment.Center
             };
 
-            StackPanel statusPanel = new StackPanel
+            StackPanel rightHeaderPanel = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
                 HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            _btnMute = new HeaderQuickToggleButton(
+                true,
+                _isMuted,
+                "Utišaj zvočna opozorila za to postajo",
+                "Vklopi zvočna opozorila za to postajo")
+            {
+                Margin = new Thickness(0, 0, 6, 0)
+            };
+            _btnMute.Toggled += (muted) =>
+            {
+                _isMuted = muted;
+                if (!_isMuted && ChimePlayer.Enabled)
+                {
+                    ChimePlayer.PlayTimeSingle();
+                }
+                if (QuickSettingsChanged != null) QuickSettingsChanged();
+            };
+
+            _btnDim = new HeaderQuickToggleButton(
+                false,
+                _isDimmed,
+                "Zatemni prikaz te postaje",
+                "Osvetli prikaz te postaje")
+            {
+                Margin = new Thickness(0, 0, 12, 0)
+            };
+            _btnDim.Toggled += (dimmed) =>
+            {
+                _isDimmed = dimmed;
+                ApplyDimVisuals();
+                if (QuickSettingsChanged != null) QuickSettingsChanged();
+            };
+
+            _statusPanel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
                 VerticalAlignment = VerticalAlignment.Center
             };
 
@@ -770,11 +897,15 @@ namespace VzpenjacaKontrola
                 VerticalAlignment = VerticalAlignment.Center
             };
 
-            statusPanel.Children.Add(_statusDot);
-            statusPanel.Children.Add(_statusText);
+            _statusPanel.Children.Add(_statusDot);
+            _statusPanel.Children.Add(_statusText);
 
-            headerGrid.Children.Add(lblStation);
-            headerGrid.Children.Add(statusPanel);
+            rightHeaderPanel.Children.Add(_btnMute);
+            rightHeaderPanel.Children.Add(_btnDim);
+            rightHeaderPanel.Children.Add(_statusPanel);
+
+            headerGrid.Children.Add(_lblStation);
+            headerGrid.Children.Add(rightHeaderPanel);
             Grid.SetRow(headerGrid, 0);
             rootGrid.Children.Add(headerGrid);
 
@@ -1047,6 +1178,18 @@ namespace VzpenjacaKontrola
             _pollTimer.Start();
 
             ApplyCounterScale(_currentScale);
+            ApplyDimVisuals();
+        }
+
+        private void ApplyDimVisuals()
+        {
+            if (_contentGrid != null)
+                _contentGrid.Opacity = _isDimmed ? 0.18 : 1.0;
+            if (_lblStation != null)
+                _lblStation.Opacity = _isDimmed ? 0.38 : 1.0;
+            if (_statusPanel != null)
+                _statusPanel.Opacity = _isDimmed ? 0.38 : 1.0;
+            Background = _isDimmed ? ThemePalette.SubCardBg : ThemePalette.CardBg;
         }
 
         public void ApplyCounterScale(double scale)
@@ -1257,7 +1400,7 @@ namespace VzpenjacaKontrola
                 _timerProgressFill.Background = ThemePalette.AccentBlue;
             }
 
-            if (!suppressChime && _lastTimeZone >= 0 && timeZone > _lastTimeZone)
+            if (!suppressChime && !_isMuted && _lastTimeZone >= 0 && timeZone > _lastTimeZone)
             {
                 if (timeZone == 1)
                     ChimePlayer.PlayTimeSingle();
@@ -1296,7 +1439,7 @@ namespace VzpenjacaKontrola
                 _personsProgressFill.Background = ThemePalette.AccentEmerald;
             }
 
-            if (!suppressChime && _lastPersonsZone >= 0 && personsZone > _lastPersonsZone)
+            if (!suppressChime && !_isMuted && _lastPersonsZone >= 0 && personsZone > _lastPersonsZone)
             {
                 if (personsZone == 1)
                     ChimePlayer.PlayPersonsSingle();
@@ -1408,10 +1551,22 @@ namespace VzpenjacaKontrola
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(10, GridUnitType.Pixel) });
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-            _cardZgoraj = new StationCardControl("ZGORNJA POSTAJA", _config.IpZgoraj, _config.CounterScale);
+            _cardZgoraj = new StationCardControl("ZGORNJA POSTAJA", _config.IpZgoraj, _config.CounterScale, _config.MuteZgoraj, _config.DimZgoraj);
+            _cardZgoraj.QuickSettingsChanged += () =>
+            {
+                _config.MuteZgoraj = _cardZgoraj.IsMuted;
+                _config.DimZgoraj = _cardZgoraj.IsDimmed;
+                _config.Save();
+            };
             Grid.SetRow(_cardZgoraj, 0);
 
-            _cardSpodaj = new StationCardControl("SPODNJA POSTAJA", _config.IpSpodaj, _config.CounterScale);
+            _cardSpodaj = new StationCardControl("SPODNJA POSTAJA", _config.IpSpodaj, _config.CounterScale, _config.MuteSpodaj, _config.DimSpodaj);
+            _cardSpodaj.QuickSettingsChanged += () =>
+            {
+                _config.MuteSpodaj = _cardSpodaj.IsMuted;
+                _config.DimSpodaj = _cardSpodaj.IsDimmed;
+                _config.Save();
+            };
             Grid.SetRow(_cardSpodaj, 2);
 
             mainGrid.Children.Add(_cardZgoraj);
