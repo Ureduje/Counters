@@ -848,7 +848,8 @@ namespace VzpenjacaKontrola
             AddButtonToGrid(personsButtonsGrid, new ModernActionButton(8, "− 1 oseba", ThemePalette.AccentCoral, 14.5), 0, 0);
             AddButtonToGrid(personsButtonsGrid, new ModernActionButton(7, "+ 1 oseba", ThemePalette.AccentEmerald, 14.5), 0, 1);
 
-            ModernActionButton btnReset = new ModernActionButton(9, "Ponastavi na 28", ThemePalette.AccentBlue, 14.0);
+            ModernActionButton btnReset = new ModernActionButton(9, "Ponastavi števec", ThemePalette.AccentBlue, 14.0);
+            btnReset.ToolTip = "Ponastavi število oseb na maksimalno kapaciteto (28)";
             btnReset.Clicked += async (btn) => await ExecuteCommandAsync(btn.CommandId);
             Grid.SetRow(btnReset, 1);
             Grid.SetColumn(btnReset, 0);
@@ -980,11 +981,12 @@ namespace VzpenjacaKontrola
                 {
                     int target = (t.MaxPersons > 0) ? t.MaxPersons : 28;
                     int attempts = 0;
-                    while (t.CurrentPersons != target && attempts < 30)
+                    while (t.CurrentPersons != target && attempts < 35)
                     {
                         attempts++;
                         int adjCmd = (t.CurrentPersons < target) ? 7 : 8;
-                        t = await Client.SendOperatorCommandAsync(adjCmd, 1200);
+                        t = await Client.SendOperatorCommandAsync(adjCmd, 800);
+                        ApplyTelemetry(t, false);
                     }
                 }
                 ApplyTelemetry(t, true);
