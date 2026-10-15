@@ -1088,11 +1088,11 @@ namespace VzpenjacaKontrola
                 ToolTip = "Nastavi interval na 10 minut (10:00)"
             };
 
-            AddButtonToGrid(timeButtonsGrid, btnInterval6, 0, 0);
+            AddButtonToGrid(timeButtonsGrid, btnInterval10, 0, 0);
             AddButtonToGrid(timeButtonsGrid, new ModernActionButton(2, "+ 1 min", ThemePalette.AccentEmerald), 0, 1);
             AddButtonToGrid(timeButtonsGrid, new ModernActionButton(3, "+ 5 min", ThemePalette.AccentEmerald), 0, 2);
 
-            AddButtonToGrid(timeButtonsGrid, btnInterval10, 1, 0);
+            AddButtonToGrid(timeButtonsGrid, btnInterval6, 1, 0);
             AddButtonToGrid(timeButtonsGrid, new ModernActionButton(5, "− 1 min", ThemePalette.AccentCoral), 1, 1);
             AddButtonToGrid(timeButtonsGrid, new ModernActionButton(6, "− 5 min", ThemePalette.AccentCoral), 1, 2);
 
