@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Dark Slate Rounded Background -->
+    <path
+        android:fillColor="#0F172A"
+        android:pathData="M0,0h108v108h-108z" />
+    <!-- Diagonal Funicular Cable -->
+    <path
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round"
+        android:pathData="M18,74 L90,26" />
+    <!-- Hanger Arm -->
+    <path
+        android:strokeColor="#94A3B8"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M54,50 L54,38" />
+    <!-- Funicular Cabin Body -->
+    <path
+        android:fillColor="#10B981"
+        android:pathData="M30,50 L78,50 C81.3,50 84,52.7 84,56 L84,78 C84,81.3 81.3,84 78,84 L30,84 C26.7,84 24,81.3 24,78 L24,56 C24,52.7 26.7,50 30,50 Z" />
+    <!-- Cabin Windows -->
+    <path
+        android:fillColor="#0B0F17"
+        android:pathData="M31,56h19v13h-19z M58,56h19v13h-19z" />
+</vector>

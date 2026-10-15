@@ -28,5 +28,14 @@ Namenska namizna aplikacija za sistem Windows z lastnimi prilagojenimi kontrolam
 4. **Dodatne možnosti v orodni vrstici:**
    - **Vedno na vrhu** (*Always on Top*)
    - **Potrdi ponastavitev oseb** (izbirna zaščita pred nenamernim klikom na ponastavitev)
-   - **Nastavitve IP** (možnost prilagoditve IP naslovov postaj, shranjeno v `%LOCALAPPDATA%\VzpenjacaKontrola\settings.ini`)
+   - **Mobilni dostop (Oblak)...** — vgrajen odhodni HTTPS posrednik (`CloudRelayBridge`), ki brez odpiranja vrat na službenem požarnem zidu in brez skrbniških pravic poveže PC aplikacijo z mobilno Android aplikacijo prek varnega kanala (privzeto `vzpenjaca-3436`).
    - **Tiha namestitev prek ukazne vrstice:** `VzpenjacaKontrola-Namestitev.exe /S`
+
+## Mobilna aplikacija za Android (`AndroidApp/`)
+
+V mapi [`AndroidApp/`](./AndroidApp) je izvorna koda namenske Android aplikacije (**Vzpenjača**), ki omogoča spremljanje in upravljanje obeh postaj od koderkoli (prek 4G/5G ali domačega Wi-Fi omrežja):
+
+- [`AndroidApp/app/src/main/java/si/vzpenjaca/kontrola/MainActivity.kt`](./AndroidApp/app/src/main/java/si/vzpenjaca/kontrola/MainActivity.kt) — Celotna Android aplikacija z:
+  - **Oblačnim mostom (`CloudRelay`)**: V realnem času sprejema telemetrijo obeh postaj iz PC aplikacije [`VzpenjacaKontrola.exe`](./VzpenjacaKontrola.exe) in pošilja operaterske ukaze (`10 min`, `6 min`, `+1 min`, `-1 min`, `+5 min`, `-5 min`, `+1 oseba`, `-1 oseba`, `Ponastavi števec`).
+  - **Neposrednim LAN načinom (`DirectLanFunicularClient`)**: Možnost preklopa v nastavitvah na neposredno surovo TCP komunikacijo s krmilnikoma `10.12.220.34` in `10.12.220.36`, kadar je telefon povezan na službeni Wi-Fi ali VPN.
+  - **Enakim temnim vmesnikom in sintetiziranimi zvočnimi opozorili (`MobileChimePlayer`)** kot namizna aplikacija.

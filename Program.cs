@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Media;
+using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -24,8 +25,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Nadzorna plošča vzpenjače — Zgornja in spodnja postaja")]
 [assembly: AssemblyCompany("Vzpenjača")]
 [assembly: AssemblyProduct("Vzpenjača")]
-[assembly: AssemblyVersion("1.0.3.0")]
-[assembly: AssemblyFileVersion("1.0.3.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 namespace VzpenjacaKontrola
 {
@@ -61,6 +62,10 @@ namespace VzpenjacaKontrola
         public bool DimSpodaj = false;
         public bool ShowIntervalBgZgoraj = true;
         public bool ShowIntervalBgSpodaj = true;
+        public bool CloudRelayEnabled = true;
+        public string CloudRelayServer = "https://ntfy.sh";
+        public string CloudChannelId = "vzpenjaca-3436";
+        public string CloudPin = "";
 
         private static string ConfigPath
         {
@@ -162,6 +167,22 @@ namespace VzpenjacaKontrola
                         {
                             cfg.ShowIntervalBgSpodaj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
                         }
+                        else if (key.Equals("CloudRelayEnabled", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.CloudRelayEnabled = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
+                        else if (key.Equals("CloudRelayServer", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(val))
+                        {
+                            cfg.CloudRelayServer = val.TrimEnd('/');
+                        }
+                        else if (key.Equals("CloudChannelId", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(val))
+                        {
+                            cfg.CloudChannelId = val;
+                        }
+                        else if (key.Equals("CloudPin", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.CloudPin = val;
+                        }
                     }
                 }
             }
@@ -196,6 +217,10 @@ namespace VzpenjacaKontrola
                 sb.AppendLine("DimSpodaj=" + (DimSpodaj ? "true" : "false"));
                 sb.AppendLine("ShowIntervalBgZgoraj=" + (ShowIntervalBgZgoraj ? "true" : "false"));
                 sb.AppendLine("ShowIntervalBgSpodaj=" + (ShowIntervalBgSpodaj ? "true" : "false"));
+                sb.AppendLine("CloudRelayEnabled=" + (CloudRelayEnabled ? "true" : "false"));
+                sb.AppendLine("CloudRelayServer=" + CloudRelayServer);
+                sb.AppendLine("CloudChannelId=" + CloudChannelId);
+                sb.AppendLine("CloudPin=" + CloudPin);
                 File.WriteAllText(ConfigPath, sb.ToString(), Encoding.UTF8);
             }
             catch { }
@@ -875,6 +900,7 @@ namespace VzpenjacaKontrola
     {
         public FunicularClient Client { get; private set; }
         public event Action QuickSettingsChanged;
+        public event Action<bool> TelemetryUpdated;
 
         private readonly TextBlock _lblStation;
         private readonly StackPanel _statusPanel;
@@ -919,6 +945,12 @@ namespace VzpenjacaKontrola
         private bool _isDimmed = false;
         private bool _showIntervalBg = true;
 
+        public bool IsOnline { get { return _isOnline; } }
+        public int CurrentPersons { get { return _currentPersons; } }
+        public int MaxPersons { get { return _maxPersons; } }
+        public long RemainingMs { get { return _remainingMs; } }
+        public long SetMs { get { return _setMs; } }
+
         public bool IsMuted
         {
             get { return _isMuted; }
@@ -959,6 +991,24 @@ namespace VzpenjacaKontrola
         {
             ShowIntervalBg = !ShowIntervalBg;
             if (QuickSettingsChanged != null) QuickSettingsChanged();
+        }
+
+        public Task ExecuteRemoteCommandAsync(int commandId)
+        {
+            TaskCompletionSource<bool> tcs = new TaskCompletionSource<bool>();
+            Dispatcher.BeginInvoke(new Action(async () =>
+            {
+                try
+                {
+                    await ExecuteCommandAsync(commandId);
+                    tcs.TrySetResult(true);
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            }));
+            return tcs.Task;
         }
 
         public StationCardControl(string stationName, string ipAddress, double initialScale = 1.0, bool initialMuted = false, bool initialDimmed = false, bool initialShowIntervalBg = true)
@@ -1597,6 +1647,9 @@ namespace VzpenjacaKontrola
             long prevRemainingMs = _remainingMs;
             long prevSetMs = _setMs;
             int prevPersons = _currentPersons;
+            int prevMax = _maxPersons;
+
+            bool timeJump = Math.Abs(t.RemainingTimeMs - _remainingMs) > 2500;
 
             _setMs = t.SetTimeMs;
             if (forceSyncTime || wasOffline || Math.Abs(t.RemainingTimeMs - _remainingMs) > 2000)
@@ -1624,10 +1677,18 @@ namespace VzpenjacaKontrola
             RenderTime(isFirstLoad);
             RenderPersons(isFirstLoad);
             _hasInitialTelemetry = true;
+
+            bool significantChange = isFirstLoad || wasOffline || forceSyncTime || timeJump ||
+                                     prevPersons != _currentPersons || prevMax != _maxPersons || prevSetMs != _setMs;
+            if (TelemetryUpdated != null)
+            {
+                TelemetryUpdated(significantChange);
+            }
         }
 
         private void SetOfflineState()
         {
+            bool wasOnline = _isOnline;
             _isOnline = false;
             _statusDot.Fill = ThemePalette.AccentCoral;
             _statusText.Text = "Ni povezave";
@@ -1642,6 +1703,11 @@ namespace VzpenjacaKontrola
             _txtPersonsMax.Text = " / --";
             _timerProgressFill.Width = 0;
             _personsProgressFill.Width = 0;
+
+            if (wasOnline && TelemetryUpdated != null)
+            {
+                TelemetryUpdated(true);
+            }
         }
 
         private void RenderTime(bool suppressChime = false)
@@ -1755,6 +1821,549 @@ namespace VzpenjacaKontrola
         }
     }
 
+    /// <summary>
+    /// Outbound HTTPS Cloud Relay Bridge that connects VzpenjacaKontrola (in the office network)
+    /// with the Android mobile app from anywhere without requiring port-forwarding or admin rights.
+    /// </summary>
+    public class CloudRelayBridge : IDisposable
+    {
+        private readonly AppConfig _config;
+        private readonly StationCardControl _cardZgoraj;
+        private readonly StationCardControl _cardSpodaj;
+        private readonly SemaphoreSlim _publishLock = new SemaphoreSlim(1, 1);
+        private CancellationTokenSource _cts;
+        private DateTime _lastPublishUtc = DateTime.MinValue;
+        private DateTime _lastMobileActiveUtc = DateTime.UtcNow;
+        private string _lastStateSignature = "";
+        private readonly System.Collections.Generic.HashSet<string> _processedIds = new System.Collections.Generic.HashSet<string>();
+
+        public bool IsConnected { get; private set; }
+        public string LastStatusText { get; private set; }
+        public event Action StatusChanged;
+
+        static CloudRelayBridge()
+        {
+            try
+            {
+                // Enable TLS 1.2 (3072) and TLS 1.1 (768) on .NET Framework 4.x
+                ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | (SecurityProtocolType)768 | SecurityProtocolType.Tls;
+                ServicePointManager.DefaultConnectionLimit = 16;
+                ServicePointManager.Expect100Continue = false;
+            }
+            catch { }
+        }
+
+        public CloudRelayBridge(AppConfig config, StationCardControl cardZgoraj, StationCardControl cardSpodaj)
+        {
+            _config = config;
+            _cardZgoraj = cardZgoraj;
+            _cardSpodaj = cardSpodaj;
+            LastStatusText = "Pripravljeno";
+
+            _cardZgoraj.TelemetryUpdated += OnStationTelemetryUpdated;
+            _cardSpodaj.TelemetryUpdated += OnStationTelemetryUpdated;
+        }
+
+        public static string SanitizeChannel(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return "vzpenjaca-3436";
+            StringBuilder sb = new StringBuilder();
+            foreach (char c in raw.Trim())
+            {
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_')
+                    sb.Append(char.ToLowerInvariant(c));
+            }
+            return sb.Length >= 4 ? sb.ToString() : "vzpenjaca-3436";
+        }
+
+        public string StateTopic
+        {
+            get { return SanitizeChannel(_config.CloudChannelId) + "-state"; }
+        }
+
+        public string CommandTopic
+        {
+            get { return SanitizeChannel(_config.CloudChannelId) + "-cmd"; }
+        }
+
+        public void Start()
+        {
+            Stop();
+            if (!_config.CloudRelayEnabled)
+            {
+                IsConnected = false;
+                UpdateStatus("Izklopljeno v nastavitvah");
+                return;
+            }
+
+            _cts = new CancellationTokenSource();
+            CancellationToken token = _cts.Token;
+            Task.Run(() => ListenCommandsLoopAsync(token));
+            Task.Run(async () =>
+            {
+                await Task.Delay(1500);
+                if (!token.IsCancellationRequested)
+                {
+                    await PublishStateAsync(true);
+                }
+            });
+        }
+
+        public void Stop()
+        {
+            if (_cts != null)
+            {
+                try { _cts.Cancel(); } catch { }
+                _cts = null;
+            }
+            IsConnected = false;
+        }
+
+        public void Restart()
+        {
+            _lastStateSignature = "";
+            _lastMobileActiveUtc = DateTime.UtcNow;
+            Start();
+        }
+
+        private void UpdateStatus(string text)
+        {
+            LastStatusText = text;
+            if (StatusChanged != null)
+            {
+                try { StatusChanged(); } catch { }
+            }
+        }
+
+        private void OnStationTelemetryUpdated(bool significantChange)
+        {
+            if (!_config.CloudRelayEnabled) return;
+
+            DateTime now = DateTime.UtcNow;
+            bool mobileRecentlyActive = (now - _lastMobileActiveUtc).TotalMinutes < 10.0;
+            string sig = BuildStateSignature();
+            bool sigChanged = (sig != _lastStateSignature);
+
+            if (significantChange && sigChanged)
+            {
+                Task.Run(() => PublishStateAsync(false));
+            }
+            else if (mobileRecentlyActive && (now - _lastPublishUtc).TotalSeconds >= 18.0)
+            {
+                Task.Run(() => PublishStateAsync(false));
+            }
+        }
+
+        private string BuildStateSignature()
+        {
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "{0}:{1}:{2}:{3}|{4}:{5}:{6}:{7}",
+                _cardZgoraj.IsOnline ? 1 : 0,
+                _cardZgoraj.CurrentPersons,
+                _cardZgoraj.MaxPersons,
+                _cardZgoraj.SetMs,
+                _cardSpodaj.IsOnline ? 1 : 0,
+                _cardSpodaj.CurrentPersons,
+                _cardSpodaj.MaxPersons,
+                _cardSpodaj.SetMs);
+        }
+
+        public async Task<bool> PublishStateAsync(bool force)
+        {
+            if (!_config.CloudRelayEnabled) return false;
+
+            DateTime now = DateTime.UtcNow;
+            if (!force && (now - _lastPublishUtc).TotalMilliseconds < 900)
+                return false;
+
+            if (!await _publishLock.WaitAsync(0).ConfigureAwait(false))
+                return false;
+
+            try
+            {
+                _lastPublishUtc = DateTime.UtcNow;
+                _lastStateSignature = BuildStateSignature();
+
+                long unixMs = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+                string payload = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{{\"ts\":{0},\"zOn\":{1},\"zCur\":{2},\"zMax\":{3},\"zRem\":{4},\"zSet\":{5},\"sOn\":{6},\"sCur\":{7},\"sMax\":{8},\"sRem\":{9},\"sSet\":{10}}}",
+                    unixMs,
+                    _cardZgoraj.IsOnline ? 1 : 0,
+                    _cardZgoraj.CurrentPersons,
+                    _cardZgoraj.MaxPersons,
+                    _cardZgoraj.RemainingMs,
+                    _cardZgoraj.SetMs,
+                    _cardSpodaj.IsOnline ? 1 : 0,
+                    _cardSpodaj.CurrentPersons,
+                    _cardSpodaj.MaxPersons,
+                    _cardSpodaj.RemainingMs,
+                    _cardSpodaj.SetMs);
+
+                string server = string.IsNullOrEmpty(_config.CloudRelayServer) ? "https://ntfy.sh" : _config.CloudRelayServer.TrimEnd('/');
+                string url = server + "/" + StateTopic;
+
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "POST";
+                req.ContentType = "text/plain; charset=utf-8";
+                req.Timeout = 6000;
+                req.ReadWriteTimeout = 6000;
+                req.KeepAlive = true;
+
+                byte[] bytes = Encoding.UTF8.GetBytes(payload);
+                req.ContentLength = bytes.Length;
+
+                using (Stream reqStream = await req.GetRequestStreamAsync().ConfigureAwait(false))
+                {
+                    await reqStream.WriteAsync(bytes, 0, bytes.Length).ConfigureAwait(false);
+                }
+
+                using (WebResponse resp = await req.GetResponseAsync().ConfigureAwait(false))
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                _publishLock.Release();
+            }
+        }
+
+        private async Task ListenCommandsLoopAsync(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                HttpWebRequest req = null;
+                bool failed = false;
+                try
+                {
+                    string server = string.IsNullOrEmpty(_config.CloudRelayServer) ? "https://ntfy.sh" : _config.CloudRelayServer.TrimEnd('/');
+                    string streamUrl = server + "/" + CommandTopic + "/json";
+
+                    UpdateStatus("Povezovanje v oblak...");
+                    req = (HttpWebRequest)WebRequest.Create(streamUrl);
+                    req.Method = "GET";
+                    req.Accept = "application/x-ndjson, application/json";
+                    req.Timeout = 15000;
+                    req.ReadWriteTimeout = 75000;
+                    req.AllowReadStreamBuffering = false;
+
+                    using ( token.Register(() => { try { req.Abort(); } catch { } }) )
+                    using (WebResponse resp = await req.GetResponseAsync().ConfigureAwait(false))
+                    using (Stream stream = resp.GetResponseStream())
+                    using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
+                    {
+                        IsConnected = true;
+                        UpdateStatus("Povezano (" + SanitizeChannel(_config.CloudChannelId) + ")");
+
+                        while (!token.IsCancellationRequested)
+                        {
+                            string line = await reader.ReadLineAsync().ConfigureAwait(false);
+                            if (line == null) break;
+                            string trimmed = line.Trim();
+                            if (trimmed.Length == 0) continue;
+                            await HandleIncomingStreamLineAsync(trimmed).ConfigureAwait(false);
+                        }
+                    }
+                }
+                catch
+                {
+                    IsConnected = false;
+                    failed = true;
+                }
+
+                if (failed && !token.IsCancellationRequested)
+                {
+                    UpdateStatus("Ponovno povezovanje...");
+                    await Task.Delay(3000).ConfigureAwait(false);
+                }
+            }
+        }
+
+        private async Task HandleIncomingStreamLineAsync(string line)
+        {
+            try
+            {
+                string evt = ExtractJsonString(line, "event");
+                if (!string.Equals(evt, "message", StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                string msgId = ExtractJsonString(line, "id");
+                if (!string.IsNullOrEmpty(msgId))
+                {
+                    lock (_processedIds)
+                    {
+                        if (_processedIds.Contains(msgId)) return;
+                        if (_processedIds.Count > 200) _processedIds.Clear();
+                        _processedIds.Add(msgId);
+                    }
+                }
+
+                string innerJson = ExtractJsonString(line, "message");
+                if (string.IsNullOrEmpty(innerJson)) return;
+
+                string station = ExtractJsonString(innerJson, "station");
+                string pin = ExtractJsonString(innerJson, "pin");
+                int cmdId = (int)ExtractJsonLong(innerJson, "cmd", -1);
+
+                if (!string.IsNullOrEmpty(_config.CloudPin))
+                {
+                    if (!string.Equals(pin ?? "", _config.CloudPin.Trim(), StringComparison.Ordinal))
+                    {
+                        return;
+                    }
+                }
+
+                _lastMobileActiveUtc = DateTime.UtcNow;
+
+                if (string.Equals(station, "sync", StringComparison.OrdinalIgnoreCase) || cmdId == 0)
+                {
+                    await PublishStateAsync(true).ConfigureAwait(false);
+                    return;
+                }
+
+                if (cmdId >= 1 && cmdId <= 11)
+                {
+                    if (string.Equals(station, "zgoraj", StringComparison.OrdinalIgnoreCase))
+                    {
+                        UpdateStatus("Mobilni ukaz: Zgoraj ?" + cmdId);
+                        await _cardZgoraj.ExecuteRemoteCommandAsync(cmdId).ConfigureAwait(false);
+                        await PublishStateAsync(true).ConfigureAwait(false);
+                    }
+                    else if (string.Equals(station, "spodaj", StringComparison.OrdinalIgnoreCase))
+                    {
+                        UpdateStatus("Mobilni ukaz: Spodaj ?" + cmdId);
+                        await _cardSpodaj.ExecuteRemoteCommandAsync(cmdId).ConfigureAwait(false);
+                        await PublishStateAsync(true).ConfigureAwait(false);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static string ExtractJsonString(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return null;
+            string pattern = "\"" + key + "\"";
+            int idx = json.IndexOf(pattern, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return null;
+            int colon = json.IndexOf(':', idx + pattern.Length);
+            if (colon < 0) return null;
+            int qStart = json.IndexOf('"', colon + 1);
+            if (qStart < 0) return null;
+
+            StringBuilder sb = new StringBuilder();
+            bool escaped = false;
+            for (int i = qStart + 1; i < json.Length; i++)
+            {
+                char c = json[i];
+                if (escaped)
+                {
+                    if (c == '"' || c == '\\' || c == '/') sb.Append(c);
+                    else if (c == 'n') sb.Append('\n');
+                    else if (c == 'r') sb.Append('\r');
+                    else if (c == 't') sb.Append('\t');
+                    else sb.Append(c);
+                    escaped = false;
+                }
+                else
+                {
+                    if (c == '\\') escaped = true;
+                    else if (c == '"') return sb.ToString();
+                    else sb.Append(c);
+                }
+            }
+            return sb.ToString();
+        }
+
+        public static long ExtractJsonLong(string json, string key, long defaultValue)
+        {
+            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return defaultValue;
+            string pattern = "\"" + key + "\"";
+            int idx = json.IndexOf(pattern, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return defaultValue;
+            int colon = json.IndexOf(':', idx + pattern.Length);
+            if (colon < 0) return defaultValue;
+
+            int i = colon + 1;
+            while (i < json.Length && (json[i] == ' ' || json[i] == '\t' || json[i] == '"')) i++;
+            int start = i;
+            if (i < json.Length && json[i] == '-') i++;
+            while (i < json.Length && char.IsDigit(json[i])) i++;
+            if (i <= start) return defaultValue;
+
+            long val;
+            if (long.TryParse(json.Substring(start, i - start), NumberStyles.Integer, CultureInfo.InvariantCulture, out val))
+                return val;
+            return defaultValue;
+        }
+
+        public void Dispose()
+        {
+            Stop();
+        }
+    }
+
+    public class CloudSettingsDialog : Window
+    {
+        private readonly AppConfig _config;
+        private readonly CloudRelayBridge _bridge;
+        private readonly CheckBox _chkEnabled;
+        private readonly TextBox _txtChannel;
+        private readonly TextBox _txtPin;
+        private readonly TextBox _txtServer;
+        private readonly TextBlock _lblLiveStatus;
+
+        public CloudSettingsDialog(Window owner, AppConfig config, CloudRelayBridge bridge)
+        {
+            Owner = owner;
+            _config = config;
+            _bridge = bridge;
+
+            Title = "Mobilni dostop (Oblak) — Vzpenjača";
+            Width = 440;
+            Height = 385;
+            ResizeMode = ResizeMode.NoResize;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            Background = ThemePalette.WindowBg;
+            Foreground = ThemePalette.TextPrimary;
+
+            StackPanel root = new StackPanel { Margin = new Thickness(18, 16, 18, 16) };
+
+            TextBlock title = new TextBlock
+            {
+                Text = "Povezava z mobilno aplikacijo (Android)",
+                FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
+                FontSize = 15,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = ThemePalette.TextPrimary,
+                Margin = new Thickness(0, 0, 0, 6)
+            };
+            root.Children.Add(title);
+
+            _lblLiveStatus = new TextBlock
+            {
+                Text = "Status: " + (_bridge != null ? _bridge.LastStatusText : ""),
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 12,
+                Foreground = ThemePalette.AccentEmerald,
+                Margin = new Thickness(0, 0, 0, 12)
+            };
+            root.Children.Add(_lblLiveStatus);
+
+            _chkEnabled = new CheckBox
+            {
+                Content = "Omogoči oblačni most za upravljanje prek telefona",
+                IsChecked = _config.CloudRelayEnabled,
+                Foreground = ThemePalette.TextPrimary,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 12.5,
+                Margin = new Thickness(0, 0, 0, 14)
+            };
+            root.Children.Add(_chkEnabled);
+
+            root.Children.Add(CreateLabel("Koda kanala (vpišite isto kodo v Android aplikaciji):"));
+            _txtChannel = CreateTextBox(_config.CloudChannelId);
+            root.Children.Add(_txtChannel);
+
+            root.Children.Add(CreateLabel("Varnostni PIN za ukaze (prazno = brez PIN-a):"));
+            _txtPin = CreateTextBox(_config.CloudPin);
+            root.Children.Add(_txtPin);
+
+            root.Children.Add(CreateLabel("Strežnik posrednika (HTTPS):"));
+            _txtServer = CreateTextBox(_config.CloudRelayServer);
+            root.Children.Add(_txtServer);
+
+            StackPanel btnRow = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 14, 0, 0)
+            };
+
+            Button btnSyncNow = CreateDialogButton("Pošlji stanje zdaj", false);
+            btnSyncNow.Margin = new Thickness(0, 0, 8, 0);
+            btnSyncNow.Click += async (s, e) =>
+            {
+                if (_bridge != null)
+                {
+                    bool ok = await _bridge.PublishStateAsync(true);
+                    _lblLiveStatus.Text = ok
+                        ? "Status: Stanje uspešno poslano v oblak"
+                        : "Status: Napaka pri pošiljanju v oblak";
+                }
+            };
+
+            Button btnSave = CreateDialogButton("Shrani", true);
+            btnSave.Click += (s, e) =>
+            {
+                _config.CloudRelayEnabled = _chkEnabled.IsChecked == true;
+                _config.CloudChannelId = CloudRelayBridge.SanitizeChannel(_txtChannel.Text);
+                _config.CloudPin = (_txtPin.Text ?? "").Trim();
+                string srv = (_txtServer.Text ?? "").Trim().TrimEnd('/');
+                _config.CloudRelayServer = string.IsNullOrEmpty(srv) ? "https://ntfy.sh" : srv;
+                _config.Save();
+                if (_bridge != null) _bridge.Restart();
+                DialogResult = true;
+                Close();
+            };
+
+            btnRow.Children.Add(btnSyncNow);
+            btnRow.Children.Add(btnSave);
+            root.Children.Add(btnRow);
+
+            Content = root;
+        }
+
+        private static TextBlock CreateLabel(string text)
+        {
+            return new TextBlock
+            {
+                Text = text,
+                Foreground = ThemePalette.TextSecondary,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 11.5,
+                Margin = new Thickness(0, 0, 0, 4)
+            };
+        }
+
+        private static TextBox CreateTextBox(string initial)
+        {
+            return new TextBox
+            {
+                Text = initial ?? "",
+                Background = ThemePalette.CardBg,
+                Foreground = ThemePalette.TextPrimary,
+                BorderBrush = ThemePalette.BtnBorder,
+                CaretBrush = ThemePalette.TextPrimary,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 13,
+                Padding = new Thickness(8, 5, 8, 5),
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+        }
+
+        private static Button CreateDialogButton(string text, bool primary)
+        {
+            return new Button
+            {
+                Content = text,
+                Padding = new Thickness(14, 6, 14, 6),
+                Background = primary ? ThemePalette.AccentBlueActiveBg : ThemePalette.BtnBg,
+                Foreground = ThemePalette.TextPrimary,
+                BorderBrush = primary ? ThemePalette.AccentBlue : ThemePalette.BtnBorder,
+                FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
+                FontSize = 12.5,
+                Cursor = Cursors.Hand
+            };
+        }
+    }
+
     public class MainWindow : Window
     {
         private const int WM_SYSCOMMAND = 0x0112;
@@ -1768,6 +2377,7 @@ namespace VzpenjacaKontrola
         private const int IDM_START_WITH_WINDOWS = 0x1002;
         private const int IDM_SOUND_ENABLED = 0x1003;
         private const int IDM_VOICE_ENABLED = 0x1004;
+        private const int IDM_CLOUD_SETTINGS = 0x1005;
         private const int IDM_ZOOM_IN = 0x1010;
         private const int IDM_ZOOM_OUT = 0x1011;
         private const int IDM_ZOOM_RESET = 0x1012;
@@ -1796,6 +2406,7 @@ namespace VzpenjacaKontrola
         private readonly AppConfig _config;
         private readonly StationCardControl _cardZgoraj;
         private readonly StationCardControl _cardSpodaj;
+        private readonly CloudRelayBridge _cloudBridge;
         private IntPtr _hSysMenu = IntPtr.Zero;
         private bool _isInitialized = false;
 
@@ -1862,13 +2473,19 @@ namespace VzpenjacaKontrola
             mainGrid.Children.Add(_cardZgoraj);
             mainGrid.Children.Add(_cardSpodaj);
 
+            _cloudBridge = new CloudRelayBridge(_config, _cardZgoraj, _cardSpodaj);
+
             Content = mainGrid;
 
             SourceInitialized += OnSourceInitialized;
 
             LocationChanged += (s, e) => SaveWindowBounds();
             SizeChanged += (s, e) => SaveWindowBounds();
-            Closing += (s, e) => SaveWindowBounds();
+            Closing += (s, e) =>
+            {
+                SaveWindowBounds();
+                if (_cloudBridge != null) _cloudBridge.Dispose();
+            };
 
             MouseLeftButtonDown += (s, e) =>
             {
@@ -1933,9 +2550,11 @@ namespace VzpenjacaKontrola
             {
                 _isInitialized = true;
                 SaveWindowBounds();
+                _cloudBridge.Start();
                 await Task.WhenAll(
                     _cardZgoraj.PollStatusAsync(true),
                     _cardSpodaj.PollStatusAsync(true));
+                await _cloudBridge.PublishStateAsync(true);
             };
         }
 
@@ -2051,17 +2670,19 @@ namespace VzpenjacaKontrola
                 uint autostartFlag = _config.StartWithWindows ? MF_CHECKED : MF_UNCHECKED;
                 uint soundFlag = _config.SoundEnabled ? MF_CHECKED : MF_UNCHECKED;
                 uint voiceFlag = _config.VoiceAnnouncementEnabled ? MF_CHECKED : MF_UNCHECKED;
+                uint cloudFlag = _config.CloudRelayEnabled ? MF_CHECKED : MF_UNCHECKED;
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | topFlag, (UIntPtr)IDM_ALWAYS_ON_TOP, "Vedno na vrhu");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | autostartFlag, (UIntPtr)IDM_START_WITH_WINDOWS, "Zaženi ob zagonu računalnika");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | soundFlag, (UIntPtr)IDM_SOUND_ENABLED, "Zvočna opozorila");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | voiceFlag, (UIntPtr)IDM_VOICE_ENABLED, "Glasovno obvestilo ob odhodu");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | cloudFlag, (UIntPtr)IDM_CLOUD_SETTINGS, "Mobilni dostop (Oblak)...");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_TOGGLE_CONTROLS, "Preklopi kontrole okna\t(F11)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_IN, "Povečaj števce\t(Ctrl +)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_OUT, "Pomanjšaj števce\t(Ctrl -)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_RESET, "Ponastavi velikost števcev\t(Ctrl 0)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
-                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.0.3");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.1.0");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
             }
         }
@@ -2123,6 +2744,13 @@ namespace VzpenjacaKontrola
                     }
                     handled = true;
                 }
+                else if (cmd == IDM_CLOUD_SETTINGS)
+                {
+                    CloudSettingsDialog dlg = new CloudSettingsDialog(this, _config, _cloudBridge);
+                    dlg.ShowDialog();
+                    RefreshSystemMenu();
+                    handled = true;
+                }
                 else if (cmd == IDM_TOGGLE_CONTROLS)
                 {
                     ToggleWindowControls();
@@ -2146,7 +2774,7 @@ namespace VzpenjacaKontrola
                 else if (cmd == IDM_VERSION)
                 {
                     MessageBox.Show(
-                        "Nadzorna plošča vzpenjače\nRazličica 1.0.3\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj,
+                        "Nadzorna plošča vzpenjače\nRazličica 1.1.0\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj + "\nMobilni kanal: " + _config.CloudChannelId,
                         "O programu — Vzpenjača",
                         MessageBoxButton.OK,
                         MessageBoxImage.Information);

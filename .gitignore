@@ -5,3 +5,7 @@ settings.ini
 .vs/
 bin/
 obj/
+AndroidApp/.gradle/
+AndroidApp/build/
+AndroidApp/app/build/
+AndroidApp/local.properties
