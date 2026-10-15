@@ -245,8 +245,12 @@ namespace VzpenjacaKontrola
 
                             string partial = Encoding.ASCII.GetString(ms.ToArray());
                             string bodyCandidate = ExtractPayloadLine(partial);
-                            if (bodyCandidate != null && bodyCandidate.Split('#').Length >= 5)
-                                break;
+                            if (bodyCandidate != null)
+                            {
+                                string[] parts = bodyCandidate.Split('#');
+                                if (parts.Length >= 5 && parts[4].Trim().Length >= 1)
+                                    break;
+                            }
                         }
                         return Encoding.ASCII.GetString(ms.ToArray());
                     }
@@ -976,20 +980,38 @@ namespace VzpenjacaKontrola
             _isCommandBusy = true;
             try
             {
-                StationTelemetry t = await Client.SendOperatorCommandAsync(commandId, 1800);
                 if (commandId == 9)
                 {
-                    int target = (t.MaxPersons > 0) ? t.MaxPersons : 28;
+                    const int targetMax = 28;
+                    StationTelemetry t = await Client.SendOperatorCommandAsync(0, 1800);
                     int attempts = 0;
-                    while (t.CurrentPersons != target && attempts < 35)
+                    while (t.MaxPersons != targetMax && attempts < 35)
                     {
                         attempts++;
-                        int adjCmd = (t.CurrentPersons < target) ? 7 : 8;
-                        t = await Client.SendOperatorCommandAsync(adjCmd, 800);
-                        ApplyTelemetry(t, false);
+                        int adjCmd = (t.MaxPersons < targetMax) ? 7 : 8;
+                        await Task.Delay(40);
+                        bool stepFailed = false;
+                        try
+                        {
+                            t = await Client.SendOperatorCommandAsync(adjCmd, 1500);
+                            ApplyTelemetry(t, false);
+                        }
+                        catch
+                        {
+                            stepFailed = true;
+                        }
+                        if (stepFailed)
+                        {
+                            await Task.Delay(120);
+                        }
                     }
+                    ApplyTelemetry(t, true);
                 }
-                ApplyTelemetry(t, true);
+                else
+                {
+                    StationTelemetry t = await Client.SendOperatorCommandAsync(commandId, 1800);
+                    ApplyTelemetry(t, true);
+                }
             }
             catch
             {
