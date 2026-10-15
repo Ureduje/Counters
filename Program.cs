@@ -24,8 +24,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Nadzorna plošča vzpenjače — Zgornja in spodnja postaja")]
 [assembly: AssemblyCompany("Vzpenjača")]
 [assembly: AssemblyProduct("Vzpenjača")]
-[assembly: AssemblyVersion("2.3.0.0")]
-[assembly: AssemblyFileVersion("2.3.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 namespace VzpenjacaKontrola
 {
@@ -1486,6 +1486,7 @@ namespace VzpenjacaKontrola
         private const int IDM_ZOOM_OUT = 0x1011;
         private const int IDM_ZOOM_RESET = 0x1012;
         private const int IDM_TOGGLE_CONTROLS = 0x1013;
+        private const int IDM_VERSION = 0x1020;
 
         private const int DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19;
         private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
@@ -1753,6 +1754,7 @@ namespace VzpenjacaKontrola
         {
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
             if (hwnd == IntPtr.Zero) return;
+            GetSystemMenu(hwnd, true);
             _hSysMenu = GetSystemMenu(hwnd, false);
             if (_hSysMenu != IntPtr.Zero)
             {
@@ -1767,6 +1769,8 @@ namespace VzpenjacaKontrola
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_IN, "Povečaj števce\t(Ctrl +)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_OUT, "Pomanjšaj števce\t(Ctrl -)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_RESET, "Ponastavi velikost števcev\t(Ctrl 0)");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.0.1");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
             }
         }
@@ -1834,6 +1838,15 @@ namespace VzpenjacaKontrola
                 else if (cmd == IDM_ZOOM_RESET)
                 {
                     SetScale(1.0);
+                    handled = true;
+                }
+                else if (cmd == IDM_VERSION)
+                {
+                    MessageBox.Show(
+                        "Nadzorna plošča vzpenjače\nRazličica 1.0.1\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj,
+                        "O programu — Vzpenjača",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
                     handled = true;
                 }
             }

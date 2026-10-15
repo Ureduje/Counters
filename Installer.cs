@@ -10,8 +10,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Uporabniški namestitveni program (brez skrbniških pravic)")]
 [assembly: AssemblyCompany("Vzpenjača Kontrola")]
 [assembly: AssemblyProduct("Vzpenjača Kontrola")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 namespace VzpenjacaInstaller
 {
