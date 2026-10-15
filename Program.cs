@@ -58,6 +58,8 @@ namespace VzpenjacaKontrola
         public bool MuteSpodaj = false;
         public bool DimZgoraj = false;
         public bool DimSpodaj = false;
+        public bool ShowIntervalBgZgoraj = true;
+        public bool ShowIntervalBgSpodaj = true;
 
         private static string ConfigPath
         {
@@ -147,6 +149,14 @@ namespace VzpenjacaKontrola
                         {
                             cfg.DimSpodaj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
                         }
+                        else if (key.Equals("ShowIntervalBgZgoraj", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.ShowIntervalBgZgoraj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
+                        else if (key.Equals("ShowIntervalBgSpodaj", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.ShowIntervalBgSpodaj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
                     }
                 }
             }
@@ -178,6 +188,8 @@ namespace VzpenjacaKontrola
                 sb.AppendLine("MuteSpodaj=" + (MuteSpodaj ? "true" : "false"));
                 sb.AppendLine("DimZgoraj=" + (DimZgoraj ? "true" : "false"));
                 sb.AppendLine("DimSpodaj=" + (DimSpodaj ? "true" : "false"));
+                sb.AppendLine("ShowIntervalBgZgoraj=" + (ShowIntervalBgZgoraj ? "true" : "false"));
+                sb.AppendLine("ShowIntervalBgSpodaj=" + (ShowIntervalBgSpodaj ? "true" : "false"));
                 File.WriteAllText(ConfigPath, sb.ToString(), Encoding.UTF8);
             }
             catch { }
@@ -743,6 +755,8 @@ namespace VzpenjacaKontrola
 
         private readonly TextBlock _txtTimerValue;
         private readonly TextBlock _txtSetTimeValue;
+        private readonly Grid _bgIntervalGrid;
+        private readonly TextBlock _txtBgIntervalValue;
         private readonly Border _timerProgressFill;
         private readonly Border _timerProgressTrack;
 
@@ -768,6 +782,7 @@ namespace VzpenjacaKontrola
         private int _lastPersonsZone = -1;
         private bool _isMuted = false;
         private bool _isDimmed = false;
+        private bool _showIntervalBg = true;
 
         public bool IsMuted
         {
@@ -792,12 +807,32 @@ namespace VzpenjacaKontrola
             }
         }
 
-        public StationCardControl(string stationName, string ipAddress, double initialScale = 1.0, bool initialMuted = false, bool initialDimmed = false)
+        public bool ShowIntervalBg
+        {
+            get { return _showIntervalBg; }
+            set
+            {
+                _showIntervalBg = value;
+                if (_bgIntervalGrid != null)
+                {
+                    _bgIntervalGrid.Visibility = _showIntervalBg ? Visibility.Visible : Visibility.Collapsed;
+                }
+            }
+        }
+
+        public void ToggleIntervalBackground()
+        {
+            ShowIntervalBg = !ShowIntervalBg;
+            if (QuickSettingsChanged != null) QuickSettingsChanged();
+        }
+
+        public StationCardControl(string stationName, string ipAddress, double initialScale = 1.0, bool initialMuted = false, bool initialDimmed = false, bool initialShowIntervalBg = true)
         {
             Client = new FunicularClient(ipAddress, 80);
             _currentScale = Math.Max(0.65, Math.Min(1.90, initialScale));
             _isMuted = initialMuted;
             _isDimmed = initialDimmed;
+            _showIntervalBg = initialShowIntervalBg;
 
             Background = ThemePalette.CardBg;
             BorderBrush = ThemePalette.CardBorder;
@@ -922,6 +957,39 @@ namespace VzpenjacaKontrola
             timeDisplayGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
             timeDisplayGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
+            // Background Interval Display (80% height, 80% transparency = Opacity 0.20)
+            _bgIntervalGrid = new Grid
+            {
+                IsHitTestVisible = false,
+                Opacity = 0.20,
+                Visibility = _showIntervalBg ? Visibility.Visible : Visibility.Collapsed
+            };
+            _bgIntervalGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(0.1, GridUnitType.Star) });
+            _bgIntervalGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(0.8, GridUnitType.Star) });
+            _bgIntervalGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(0.1, GridUnitType.Star) });
+
+            Viewbox bgIntervalViewbox = new Viewbox
+            {
+                Stretch = Stretch.Uniform,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _txtBgIntervalValue = new TextBlock
+            {
+                Text = "--:--",
+                Foreground = ThemePalette.TextSecondary,
+                FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 100,
+                TextAlignment = TextAlignment.Center
+            };
+            Typography.SetNumeralAlignment(_txtBgIntervalValue, FontNumeralAlignment.Tabular);
+            bgIntervalViewbox.Child = _txtBgIntervalValue;
+            Grid.SetRow(bgIntervalViewbox, 1);
+            _bgIntervalGrid.Children.Add(bgIntervalViewbox);
+            Grid.SetRowSpan(_bgIntervalGrid, 3);
+            timeDisplayGrid.Children.Add(_bgIntervalGrid);
+
             Grid timeTopRow = new Grid();
             TextBlock lblTimeHeader = new TextBlock
             {
@@ -938,7 +1006,22 @@ namespace VzpenjacaKontrola
                 FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
                 FontSize = 10.5,
                 FontWeight = FontWeights.SemiBold,
-                HorizontalAlignment = HorizontalAlignment.Right
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Cursor = Cursors.Hand,
+                ToolTip = "Kliknite za vklop / izklop prikaza intervala v ozadju"
+            };
+            _txtSetTimeValue.MouseLeftButtonDown += (s, e) =>
+            {
+                ToggleIntervalBackground();
+                e.Handled = true;
+            };
+            _txtSetTimeValue.MouseEnter += (s, e) =>
+            {
+                _txtSetTimeValue.Foreground = ThemePalette.TextPrimary;
+            };
+            _txtSetTimeValue.MouseLeave += (s, e) =>
+            {
+                _txtSetTimeValue.Foreground = ThemePalette.TextSecondary;
             };
             timeTopRow.Children.Add(lblTimeHeader);
             timeTopRow.Children.Add(_txtSetTimeValue);
@@ -1355,6 +1438,8 @@ namespace VzpenjacaKontrola
 
             _txtTimerValue.Text = "--:--";
             _txtTimerValue.Foreground = ThemePalette.TextMuted;
+            if (_txtBgIntervalValue != null)
+                _txtBgIntervalValue.Text = "--:--";
             _txtPersonsCurrent.Text = "--";
             _txtPersonsCurrent.Foreground = ThemePalette.TextMuted;
             _txtPersonsMax.Text = " / --";
@@ -1367,8 +1452,11 @@ namespace VzpenjacaKontrola
             if (!_isOnline) return;
 
             string formattedTime = FormatMinSec(_remainingMs);
+            string formattedInterval = FormatMinSec(_setMs);
             _txtTimerValue.Text = formattedTime;
-            _txtSetTimeValue.Text = "Interval: " + FormatMinSec(_setMs);
+            _txtSetTimeValue.Text = "Interval: " + formattedInterval;
+            if (_txtBgIntervalValue != null)
+                _txtBgIntervalValue.Text = formattedInterval;
 
             int timeZone;
             if (_remainingMs <= 0 || formattedTime == "00:00")
@@ -1552,20 +1640,22 @@ namespace VzpenjacaKontrola
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(10, GridUnitType.Pixel) });
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-            _cardZgoraj = new StationCardControl("ZGORNJA POSTAJA", _config.IpZgoraj, _config.CounterScale, _config.MuteZgoraj, _config.DimZgoraj);
+            _cardZgoraj = new StationCardControl("ZGORNJA POSTAJA", _config.IpZgoraj, _config.CounterScale, _config.MuteZgoraj, _config.DimZgoraj, _config.ShowIntervalBgZgoraj);
             _cardZgoraj.QuickSettingsChanged += () =>
             {
                 _config.MuteZgoraj = _cardZgoraj.IsMuted;
                 _config.DimZgoraj = _cardZgoraj.IsDimmed;
+                _config.ShowIntervalBgZgoraj = _cardZgoraj.ShowIntervalBg;
                 _config.Save();
             };
             Grid.SetRow(_cardZgoraj, 0);
 
-            _cardSpodaj = new StationCardControl("SPODNJA POSTAJA", _config.IpSpodaj, _config.CounterScale, _config.MuteSpodaj, _config.DimSpodaj);
+            _cardSpodaj = new StationCardControl("SPODNJA POSTAJA", _config.IpSpodaj, _config.CounterScale, _config.MuteSpodaj, _config.DimSpodaj, _config.ShowIntervalBgSpodaj);
             _cardSpodaj.QuickSettingsChanged += () =>
             {
                 _config.MuteSpodaj = _cardSpodaj.IsMuted;
                 _config.DimSpodaj = _cardSpodaj.IsDimmed;
+                _config.ShowIntervalBgSpodaj = _cardSpodaj.ShowIntervalBg;
                 _config.Save();
             };
             Grid.SetRow(_cardSpodaj, 2);
