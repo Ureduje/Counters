@@ -306,6 +306,8 @@ namespace VzpenjacaKontrola
         public static readonly SolidColorBrush AccentEmerald = BrushFromHex("#10B981");
         public static readonly SolidColorBrush AccentAmber = BrushFromHex("#F59E0B");
         public static readonly SolidColorBrush AccentCoral = BrushFromHex("#F43F5E");
+        public static readonly SolidColorBrush AccentYellow = BrushFromHex("#FACC15");
+        public static readonly SolidColorBrush AccentRed = BrushFromHex("#EF4444");
 
         public static readonly SolidColorBrush BtnBg = BrushFromHex("#1C2638");
         public static readonly SolidColorBrush BtnHoverBg = BrushFromHex("#26334B");
@@ -1015,13 +1017,19 @@ namespace VzpenjacaKontrola
         {
             if (!_isOnline) return;
 
-            _txtTimerValue.Text = FormatMinSec(_remainingMs);
+            string formattedTime = FormatMinSec(_remainingMs);
+            _txtTimerValue.Text = formattedTime;
             _txtSetTimeValue.Text = "Interval: " + FormatMinSec(_setMs);
 
-            if (_remainingMs == 0)
+            if (_remainingMs <= 0 || formattedTime == "00:00")
             {
-                _txtTimerValue.Foreground = ThemePalette.AccentAmber;
-                _timerProgressFill.Background = ThemePalette.AccentAmber;
+                _txtTimerValue.Foreground = ThemePalette.AccentRed;
+                _timerProgressFill.Background = ThemePalette.AccentRed;
+            }
+            else if (_remainingMs <= 60000)
+            {
+                _txtTimerValue.Foreground = ThemePalette.AccentYellow;
+                _timerProgressFill.Background = ThemePalette.AccentYellow;
             }
             else
             {
