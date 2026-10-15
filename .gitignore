@@ -1,0 +1,7 @@
+# Local settings and cache
+settings.ini
+*.log
+*.tmp
+.vs/
+bin/
+obj/
