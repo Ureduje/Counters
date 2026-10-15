@@ -24,8 +24,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Nadzorna plošča vzpenjače — Zgornja in spodnja postaja")]
 [assembly: AssemblyCompany("Vzpenjača")]
 [assembly: AssemblyProduct("Vzpenjača")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.0.2.0")]
+[assembly: AssemblyFileVersion("1.0.2.0")]
 
 namespace VzpenjacaKontrola
 {
@@ -1079,11 +1079,20 @@ namespace VzpenjacaKontrola
             for (int c = 0; c < 3; c++)
                 timeButtonsGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-            AddButtonToGrid(timeButtonsGrid, new ModernActionButton(1, "+ 15 s", ThemePalette.AccentEmerald), 0, 0);
+            ModernActionButton btnInterval6 = new ModernActionButton(10, "6 min", ThemePalette.AccentBlue)
+            {
+                ToolTip = "Nastavi interval na 6 minut (06:00)"
+            };
+            ModernActionButton btnInterval10 = new ModernActionButton(11, "10 min", ThemePalette.AccentBlue)
+            {
+                ToolTip = "Nastavi interval na 10 minut (10:00)"
+            };
+
+            AddButtonToGrid(timeButtonsGrid, btnInterval6, 0, 0);
             AddButtonToGrid(timeButtonsGrid, new ModernActionButton(2, "+ 1 min", ThemePalette.AccentEmerald), 0, 1);
             AddButtonToGrid(timeButtonsGrid, new ModernActionButton(3, "+ 5 min", ThemePalette.AccentEmerald), 0, 2);
 
-            AddButtonToGrid(timeButtonsGrid, new ModernActionButton(4, "− 15 s", ThemePalette.AccentCoral), 1, 0);
+            AddButtonToGrid(timeButtonsGrid, btnInterval10, 1, 0);
             AddButtonToGrid(timeButtonsGrid, new ModernActionButton(5, "− 1 min", ThemePalette.AccentCoral), 1, 1);
             AddButtonToGrid(timeButtonsGrid, new ModernActionButton(6, "− 5 min", ThemePalette.AccentCoral), 1, 2);
 
@@ -1358,6 +1367,41 @@ namespace VzpenjacaKontrola
                         {
                             t = await Client.SendOperatorCommandAsync(adjCmd, 1500);
                             ApplyTelemetry(t, false);
+                        }
+                        catch
+                        {
+                            stepFailed = true;
+                        }
+                        if (stepFailed)
+                        {
+                            await Task.Delay(120);
+                        }
+                    }
+                    ApplyTelemetry(t, true);
+                }
+                else if (commandId == 10 || commandId == 11)
+                {
+                    long targetSetMs = (commandId == 10) ? 360000L : 600000L;
+                    StationTelemetry t = await Client.SendOperatorCommandAsync(0, 1800);
+                    int attempts = 0;
+                    while (Math.Abs(t.SetTimeMs - targetSetMs) >= 7500 && attempts < 30)
+                    {
+                        attempts++;
+                        long diff = targetSetMs - t.SetTimeMs;
+                        int adjCmd;
+                        if (diff >= 210000) adjCmd = 3;         // + 5 min (+300s)
+                        else if (diff <= -210000) adjCmd = 6;   // - 5 min (-300s)
+                        else if (diff >= 37500) adjCmd = 2;     // + 1 min (+60s)
+                        else if (diff <= -37500) adjCmd = 5;    // - 1 min (-60s)
+                        else if (diff > 0) adjCmd = 1;          // + 15 s
+                        else adjCmd = 4;                        // - 15 s
+
+                        await Task.Delay(40);
+                        bool stepFailed = false;
+                        try
+                        {
+                            t = await Client.SendOperatorCommandAsync(adjCmd, 1500);
+                            ApplyTelemetry(t, true);
                         }
                         catch
                         {
@@ -1860,7 +1904,7 @@ namespace VzpenjacaKontrola
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_OUT, "Pomanjšaj števce\t(Ctrl -)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_RESET, "Ponastavi velikost števcev\t(Ctrl 0)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
-                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.0.1");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.0.2");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
             }
         }
@@ -1933,7 +1977,7 @@ namespace VzpenjacaKontrola
                 else if (cmd == IDM_VERSION)
                 {
                     MessageBox.Show(
-                        "Nadzorna plošča vzpenjače\nRazličica 1.0.1\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj,
+                        "Nadzorna plošča vzpenjače\nRazličica 1.0.2\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj,
                         "O programu — Vzpenjača",
                         MessageBoxButton.OK,
                         MessageBoxImage.Information);
