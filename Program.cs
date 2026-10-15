@@ -408,7 +408,7 @@ namespace VzpenjacaKontrola
             _lastDepartureSpeechUtc = now;
 
             if (minutes <= 0) minutes = 1;
-            string text = "Vzpenjača je odpeljala. Naslednja vožnja je čez " + minutes.ToString(CultureInfo.InvariantCulture) + " minut.";
+            string text = "Vzpenjača je odpeljala. Naslednja vožnja je čez " + FormatSlovenianMinutesPhrase(minutes) + ".";
 
             Thread t = new Thread(() =>
             {
@@ -442,6 +442,48 @@ namespace VzpenjacaKontrola
             t.IsBackground = true;
             t.SetApartmentState(ApartmentState.STA);
             t.Start();
+        }
+
+        private static string FormatSlovenianMinutesPhrase(int minutes)
+        {
+            if (minutes == 1) return "eno minuto";
+            if (minutes == 2) return "dve minuti";
+            if (minutes == 3) return "tri minute";
+            if (minutes == 4) return "štiri minute";
+
+            string word = NumberToSlovenianWord(minutes);
+            int mod100 = minutes % 100;
+            if (mod100 == 1) return word + " minuto";
+            if (mod100 == 2) return word + " minuti";
+            if (mod100 == 3 || mod100 == 4) return word + " minute";
+            return word + " minut";
+        }
+
+        private static string NumberToSlovenianWord(int n)
+        {
+            string[] ones = new string[]
+            {
+                "nič", "ena", "dve", "tri", "štiri", "pet", "šest", "sedem", "osem", "devet",
+                "deset", "enajst", "dvanajst", "trinajst", "štirinajst", "petnajst",
+                "šestnajst", "sedemnajst", "osemnajst", "devetnajst"
+            };
+            string[] tens = new string[]
+            {
+                "", "deset", "dvajset", "trideset", "štirideset", "petdeset",
+                "šestdeset", "sedemdeset", "osemdeset", "devetdeset"
+            };
+
+            if (n >= 0 && n < 20)
+                return ones[n];
+            if (n >= 20 && n < 100)
+            {
+                int t = n / 10;
+                int u = n % 10;
+                if (u == 0) return tens[t];
+                string unitPrefix = (u == 1) ? "ena" : (u == 2 ? "dva" : ones[u]);
+                return unitPrefix + "in" + tens[t];
+            }
+            return n.ToString(CultureInfo.InvariantCulture);
         }
 
         private static string FindSlovenianVoiceTokenPath()
