@@ -314,7 +314,7 @@ namespace VzpenjacaInstaller
                     if (key != null)
                     {
                         key.SetValue("DisplayName", "Nadzorna plošča vzpenjače");
-                        key.SetValue("DisplayVersion", "2.2.0");
+                        key.SetValue("DisplayVersion", "2.3.0");
                         key.SetValue("Publisher", "Vzpenjača Kontrola");
                         key.SetValue("DisplayIcon", targetExePath);
                         key.SetValue("InstallLocation", targetDir);

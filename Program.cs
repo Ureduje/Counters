@@ -16,6 +16,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Shapes;
+using System.Windows.Shell;
 using System.Windows.Threading;
 using Microsoft.Win32;
 
@@ -1486,6 +1487,16 @@ namespace VzpenjacaKontrola
         private const int IDM_ZOOM_RESET = 0x1012;
         private const int IDM_TOGGLE_CONTROLS = 0x1013;
 
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19;
+        private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+        private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+        private const int DWMWA_BORDER_COLOR = 34;
+        private const int DWMWA_CAPTION_COLOR = 35;
+        private const int DWMWCP_ROUND = 2;
+
+        [DllImport("dwmapi.dll", PreserveSig = true)]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
         [DllImport("user32.dll")]
         private static extern IntPtr GetSystemMenu(IntPtr hWnd, bool bRevert);
 
@@ -1513,7 +1524,7 @@ namespace VzpenjacaKontrola
             MinWidth = 280;
             MinHeight = 460;
             Topmost = _config.AlwaysOnTop;
-            WindowStyle = _config.HideWindowControls ? WindowStyle.None : WindowStyle.SingleBorderWindow;
+            ApplyWindowChrome();
 
             if (IsPositionValid(_config.WindowLeft, _config.WindowTop, _config.WindowWidth, _config.WindowHeight))
             {
@@ -1574,6 +1585,16 @@ namespace VzpenjacaKontrola
                 if (WindowStyle == WindowStyle.None && e.ButtonState == MouseButtonState.Pressed)
                 {
                     DragMove();
+                }
+            };
+
+            MouseRightButtonUp += (s, e) =>
+            {
+                if (WindowStyle == WindowStyle.None)
+                {
+                    Point p = PointToScreen(e.GetPosition(this));
+                    SystemCommands.ShowSystemMenu(this, p);
+                    e.Handled = true;
                 }
             };
 
@@ -1670,18 +1691,32 @@ namespace VzpenjacaKontrola
             _config.Save();
         }
 
-        public void ToggleWindowControls()
+        private void ApplyWindowChrome()
         {
-            if (WindowStyle == WindowStyle.None)
+            if (_config.HideWindowControls)
             {
-                WindowStyle = WindowStyle.SingleBorderWindow;
-                _config.HideWindowControls = false;
+                WindowChrome chrome = new WindowChrome
+                {
+                    CaptionHeight = 0,
+                    ResizeBorderThickness = new Thickness(4),
+                    GlassFrameThickness = new Thickness(-1),
+                    CornerRadius = new CornerRadius(0),
+                    UseAeroCaptionButtons = false
+                };
+                WindowChrome.SetWindowChrome(this, chrome);
+                WindowStyle = WindowStyle.None;
             }
             else
             {
-                WindowStyle = WindowStyle.None;
-                _config.HideWindowControls = true;
+                WindowChrome.SetWindowChrome(this, null);
+                WindowStyle = WindowStyle.SingleBorderWindow;
             }
+        }
+
+        public void ToggleWindowControls()
+        {
+            _config.HideWindowControls = !_config.HideWindowControls;
+            ApplyWindowChrome();
             _config.Save();
             RefreshSystemMenu();
         }
@@ -1691,10 +1726,26 @@ namespace VzpenjacaKontrola
             RefreshSystemMenu();
 
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
-            HwndSource source = HwndSource.FromHwnd(hwnd);
-            if (source != null)
+            if (hwnd != IntPtr.Zero)
             {
-                source.AddHook(WndProc);
+                try
+                {
+                    int dark = 1;
+                    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref dark, sizeof(int));
+                    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1, ref dark, sizeof(int));
+                    int darkBorder = 0x002A170F; // BGR for #0F172A
+                    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref darkBorder, sizeof(int));
+                    DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ref darkBorder, sizeof(int));
+                    int roundPref = DWMWCP_ROUND;
+                    DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref roundPref, sizeof(int));
+                }
+                catch { }
+
+                HwndSource source = HwndSource.FromHwnd(hwnd);
+                if (source != null)
+                {
+                    source.AddHook(WndProc);
+                }
             }
         }
 
