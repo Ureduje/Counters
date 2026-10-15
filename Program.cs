@@ -558,6 +558,7 @@ namespace VzpenjacaKontrola
         private bool _isPolling = false;
         private bool _isCommandBusy = false;
         private double _currentScale = 1.0;
+        private bool _isNarrowLayout = false;
 
         public StationCardControl(string stationName, string ipAddress, double initialScale = 1.0)
         {
