@@ -49,6 +49,7 @@ namespace VzpenjacaKontrola
         public double WindowHeight = 660;
         public double WindowLeft = double.NaN;
         public double WindowTop = double.NaN;
+        public double CounterScale = 1.0;
 
         private static string ConfigPath
         {
@@ -108,6 +109,12 @@ namespace VzpenjacaKontrola
                             if (double.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out t))
                                 cfg.WindowTop = t;
                         }
+                        else if (key.Equals("CounterScale", StringComparison.OrdinalIgnoreCase))
+                        {
+                            double cs;
+                            if (double.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out cs) && cs >= 0.6 && cs <= 2.2)
+                                cfg.CounterScale = cs;
+                        }
                     }
                 }
             }
@@ -132,6 +139,7 @@ namespace VzpenjacaKontrola
                     sb.AppendLine("WindowLeft=" + WindowLeft.ToString("0", CultureInfo.InvariantCulture));
                 if (!double.IsNaN(WindowTop) && !double.IsInfinity(WindowTop))
                     sb.AppendLine("WindowTop=" + WindowTop.ToString("0", CultureInfo.InvariantCulture));
+                sb.AppendLine("CounterScale=" + CounterScale.ToString("0.00", CultureInfo.InvariantCulture));
                 File.WriteAllText(ConfigPath, sb.ToString(), Encoding.UTF8);
             }
             catch { }
@@ -549,11 +557,12 @@ namespace VzpenjacaKontrola
         private bool _isOnline = false;
         private bool _isPolling = false;
         private bool _isCommandBusy = false;
-        private bool _isNarrowLayout = false;
+        private double _currentScale = 1.0;
 
-        public StationCardControl(string stationName, string ipAddress)
+        public StationCardControl(string stationName, string ipAddress, double initialScale = 1.0)
         {
             Client = new FunicularClient(ipAddress, 80);
+            _currentScale = Math.Max(0.65, Math.Min(1.90, initialScale));
 
             Background = ThemePalette.CardBg;
             BorderBrush = ThemePalette.CardBorder;
@@ -877,6 +886,23 @@ namespace VzpenjacaKontrola
             _pollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(2000) };
             _pollTimer.Tick += async (s, e) => await PollStatusAsync(false);
             _pollTimer.Start();
+
+            ApplyCounterScale(_currentScale);
+        }
+
+        public void ApplyCounterScale(double scale)
+        {
+            _currentScale = Math.Max(0.65, Math.Min(1.90, scale));
+            _txtTimerValue.FontSize = Math.Max(26, Math.Round(46 * _currentScale));
+            _txtPersonsCurrent.FontSize = Math.Max(26, Math.Round(46 * _currentScale));
+            _txtPersonsMax.FontSize = Math.Max(14, Math.Round(24 * _currentScale));
+
+            if (_timeSection.RowDefinitions.Count >= 2)
+                _timeSection.RowDefinitions[0].Height = new GridLength(1.1 * _currentScale, GridUnitType.Star);
+            if (_personsSection.RowDefinitions.Count >= 2)
+                _personsSection.RowDefinitions[0].Height = new GridLength(1.1 * _currentScale, GridUnitType.Star);
+
+            UpdateProgressBars();
         }
 
         private void ApplyOrientationLayout(bool narrowVertical)
@@ -927,6 +953,11 @@ namespace VzpenjacaKontrola
                 Grid.SetRow(_personsSection, 0);
                 Grid.SetColumn(_personsSection, 2);
             }
+
+            if (_timeSection.RowDefinitions.Count >= 2)
+                _timeSection.RowDefinitions[0].Height = new GridLength(1.1 * _currentScale, GridUnitType.Star);
+            if (_personsSection.RowDefinitions.Count >= 2)
+                _personsSection.RowDefinitions[0].Height = new GridLength(1.1 * _currentScale, GridUnitType.Star);
         }
 
         private void AddButtonToGrid(Grid grid, ModernActionButton btn, int row, int col)
@@ -1028,8 +1059,8 @@ namespace VzpenjacaKontrola
             }
             else if (_remainingMs <= 60000)
             {
-                _txtTimerValue.Foreground = ThemePalette.AccentYellow;
-                _timerProgressFill.Background = ThemePalette.AccentYellow;
+                _txtTimerValue.Foreground = ThemePalette.AccentAmber;
+                _timerProgressFill.Background = ThemePalette.AccentAmber;
             }
             else
             {
@@ -1106,6 +1137,9 @@ namespace VzpenjacaKontrola
         private const uint SC_CLOSE = 0xF060;
         private const int IDM_ALWAYS_ON_TOP = 0x1001;
         private const int IDM_START_WITH_WINDOWS = 0x1002;
+        private const int IDM_ZOOM_IN = 0x1010;
+        private const int IDM_ZOOM_OUT = 0x1011;
+        private const int IDM_ZOOM_RESET = 0x1012;
 
         [DllImport("user32.dll")]
         private static extern IntPtr GetSystemMenu(IntPtr hWnd, bool bRevert);
@@ -1159,10 +1193,10 @@ namespace VzpenjacaKontrola
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(10, GridUnitType.Pixel) });
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-            _cardZgoraj = new StationCardControl("ZGORNJA POSTAJA", _config.IpZgoraj);
+            _cardZgoraj = new StationCardControl("ZGORNJA POSTAJA", _config.IpZgoraj, _config.CounterScale);
             Grid.SetRow(_cardZgoraj, 0);
 
-            _cardSpodaj = new StationCardControl("SPODNJA POSTAJA", _config.IpSpodaj);
+            _cardSpodaj = new StationCardControl("SPODNJA POSTAJA", _config.IpSpodaj, _config.CounterScale);
             Grid.SetRow(_cardSpodaj, 2);
 
             mainGrid.Children.Add(_cardZgoraj);
@@ -1175,6 +1209,40 @@ namespace VzpenjacaKontrola
             LocationChanged += (s, e) => SaveWindowBounds();
             SizeChanged += (s, e) => SaveWindowBounds();
             Closing += (s, e) => SaveWindowBounds();
+
+            KeyDown += (s, e) =>
+            {
+                if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+                {
+                    if (e.Key == Key.OemPlus || e.Key == Key.Add)
+                    {
+                        AdjustScale(0.1);
+                        e.Handled = true;
+                    }
+                    else if (e.Key == Key.OemMinus || e.Key == Key.Subtract)
+                    {
+                        AdjustScale(-0.1);
+                        e.Handled = true;
+                    }
+                    else if (e.Key == Key.D0 || e.Key == Key.NumPad0)
+                    {
+                        SetScale(1.0);
+                        e.Handled = true;
+                    }
+                }
+            };
+
+            PreviewMouseWheel += (s, e) =>
+            {
+                if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+                {
+                    if (e.Delta > 0)
+                        AdjustScale(0.08);
+                    else if (e.Delta < 0)
+                        AdjustScale(-0.08);
+                    e.Handled = true;
+                }
+            };
 
             Loaded += async (s, e) =>
             {
@@ -1215,6 +1283,19 @@ namespace VzpenjacaKontrola
             }
         }
 
+        private void AdjustScale(double delta)
+        {
+            SetScale(Math.Round(Math.Max(0.65, Math.Min(1.90, _config.CounterScale + delta)), 2));
+        }
+
+        private void SetScale(double newScale)
+        {
+            _config.CounterScale = newScale;
+            _cardZgoraj.ApplyCounterScale(newScale);
+            _cardSpodaj.ApplyCounterScale(newScale);
+            _config.Save();
+        }
+
         private void OnSourceInitialized(object sender, EventArgs e)
         {
             IntPtr hwnd = new WindowInteropHelper(this).Handle;
@@ -1225,6 +1306,10 @@ namespace VzpenjacaKontrola
                 uint autostartFlag = _config.StartWithWindows ? MF_CHECKED : MF_UNCHECKED;
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | topFlag, (UIntPtr)IDM_ALWAYS_ON_TOP, "Vedno na vrhu");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | autostartFlag, (UIntPtr)IDM_START_WITH_WINDOWS, "Zaženi ob zagonu računalnika");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_IN, "Povečaj števce\t(Ctrl +)");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_OUT, "Pomanjšaj števce\t(Ctrl -)");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_RESET, "Ponastavi velikost števcev\t(Ctrl 0)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
             }
 
@@ -1262,6 +1347,21 @@ namespace VzpenjacaKontrola
                     {
                         CheckMenuItem(_hSysMenu, IDM_START_WITH_WINDOWS, MF_BYCOMMAND | (_config.StartWithWindows ? MF_CHECKED : MF_UNCHECKED));
                     }
+                    handled = true;
+                }
+                else if (cmd == IDM_ZOOM_IN)
+                {
+                    AdjustScale(0.1);
+                    handled = true;
+                }
+                else if (cmd == IDM_ZOOM_OUT)
+                {
+                    AdjustScale(-0.1);
+                    handled = true;
+                }
+                else if (cmd == IDM_ZOOM_RESET)
+                {
+                    SetScale(1.0);
                     handled = true;
                 }
             }
