@@ -501,6 +501,7 @@ namespace VzpenjacaKontrola
 
         public static readonly SolidColorBrush AccentBlue = BrushFromHex("#38BDF8");
         public static readonly SolidColorBrush AccentBlueActiveBg = BrushFromHex("#162C46");
+        public static readonly SolidColorBrush AccentDarkBlue = BrushFromHex("#0F172A");
         public static readonly SolidColorBrush AccentEmerald = BrushFromHex("#10B981");
         public static readonly SolidColorBrush AccentAmber = BrushFromHex("#F59E0B");
         public static readonly SolidColorBrush AccentCoral = BrushFromHex("#F43F5E");
@@ -1079,11 +1080,11 @@ namespace VzpenjacaKontrola
             for (int c = 0; c < 3; c++)
                 timeButtonsGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-            ModernActionButton btnInterval6 = new ModernActionButton(10, "6 min", ThemePalette.AccentBlue)
+            ModernActionButton btnInterval6 = new ModernActionButton(10, "6 min", ThemePalette.AccentDarkBlue)
             {
                 ToolTip = "Nastavi interval na 6 minut (06:00)"
             };
-            ModernActionButton btnInterval10 = new ModernActionButton(11, "10 min", ThemePalette.AccentBlue)
+            ModernActionButton btnInterval10 = new ModernActionButton(11, "10 min", ThemePalette.AccentDarkBlue)
             {
                 ToolTip = "Nastavi interval na 10 minut (10:00)"
             };
@@ -1212,7 +1213,7 @@ namespace VzpenjacaKontrola
             AddButtonToGrid(personsButtonsGrid, new ModernActionButton(8, "− 1 oseba", ThemePalette.AccentCoral, 14.5), 0, 0);
             AddButtonToGrid(personsButtonsGrid, new ModernActionButton(7, "+ 1 oseba", ThemePalette.AccentEmerald, 14.5), 0, 1);
 
-            ModernActionButton btnReset = new ModernActionButton(9, "Ponastavi števec", ThemePalette.AccentBlue, 14.0);
+            ModernActionButton btnReset = new ModernActionButton(9, "Ponastavi števec", ThemePalette.AccentDarkBlue, 14.0);
             btnReset.ToolTip = "Ponastavi število oseb na maksimalno kapaciteto (28)";
             btnReset.Clicked += async (btn) => await ExecuteCommandAsync(btn.CommandId);
             Grid.SetRow(btnReset, 1);
