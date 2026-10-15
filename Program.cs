@@ -1060,7 +1060,7 @@ namespace VzpenjacaKontrola
             {
                 Height = 4,
                 CornerRadius = new CornerRadius(2),
-                Background = ThemePalette.AccentBlue,
+                Background = ThemePalette.AccentBtnMuted,
                 HorizontalAlignment = HorizontalAlignment.Left,
                 Width = 0
             };
@@ -1520,7 +1520,7 @@ namespace VzpenjacaKontrola
             {
                 timeZone = 0;
                 _txtTimerValue.Foreground = ThemePalette.TextPrimary;
-                _timerProgressFill.Background = ThemePalette.AccentBlue;
+                _timerProgressFill.Background = ThemePalette.AccentBtnMuted;
             }
 
             if (!suppressChime && !_isMuted && _lastTimeZone >= 0 && timeZone > _lastTimeZone)
