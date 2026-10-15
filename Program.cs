@@ -699,34 +699,23 @@ namespace VzpenjacaKontrola
             if (_isMuteButton)
             {
                 _iconPath.Data = _isActive ? GeomSpeakerMuted : GeomSpeakerOn;
-                if (_isActive)
-                {
-                    Background = ThemePalette.BtnPressedBg;
-                    BorderBrush = ThemePalette.AccentCoral;
-                    _iconPath.Stroke = ThemePalette.AccentCoral;
-                }
-                else
-                {
-                    Background = _isHovered ? ThemePalette.BtnHoverBg : ThemePalette.BtnBg;
-                    BorderBrush = _isHovered ? ThemePalette.BtnHoverBorder : ThemePalette.BtnBorder;
-                    _iconPath.Stroke = _isHovered ? ThemePalette.TextPrimary : ThemePalette.TextSecondary;
-                }
             }
             else
             {
                 _iconPath.Data = GeomDimMoon;
-                if (_isActive)
-                {
-                    Background = ThemePalette.AccentBlueActiveBg;
-                    BorderBrush = ThemePalette.AccentBlue;
-                    _iconPath.Stroke = ThemePalette.AccentBlue;
-                }
-                else
-                {
-                    Background = _isHovered ? ThemePalette.BtnHoverBg : ThemePalette.BtnBg;
-                    BorderBrush = _isHovered ? ThemePalette.BtnHoverBorder : ThemePalette.BtnBorder;
-                    _iconPath.Stroke = _isHovered ? ThemePalette.TextPrimary : ThemePalette.TextSecondary;
-                }
+            }
+
+            if (_isActive)
+            {
+                Background = _isHovered ? ThemePalette.BtnHoverBg : ThemePalette.BtnPressedBg;
+                BorderBrush = _isHovered ? ThemePalette.TextPrimary : ThemePalette.TextSecondary;
+                _iconPath.Stroke = ThemePalette.TextPrimary;
+            }
+            else
+            {
+                Background = _isHovered ? ThemePalette.BtnHoverBg : ThemePalette.BtnBg;
+                BorderBrush = _isHovered ? ThemePalette.BtnHoverBorder : ThemePalette.BtnBorder;
+                _iconPath.Stroke = _isHovered ? ThemePalette.TextPrimary : ThemePalette.TextSecondary;
             }
         }
     }
