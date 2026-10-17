@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -66,7 +66,7 @@ namespace VzpenjacaKontrola
         public bool ShowIntervalBgZgoraj = true;
         public bool ShowIntervalBgSpodaj = true;
         public bool CloudRelayEnabled = true;
-        public string CloudRelayServer = "https://ntfy.adminforge.de";
+        public string CloudRelayServer = "https://vzpenjaca-kontrola-default-rtdb.europe-west1.firebasedatabase.app";
         public string CloudChannelId = "vzpenjaca-3436";
         public string CloudPin = "";
 
@@ -2044,6 +2044,35 @@ namespace VzpenjacaKontrola
             return sb.Length >= 4 ? sb.ToString() : "vzpenjaca-3436";
         }
 
+        public static bool IsFirebaseServer(string server)
+        {
+            if (string.IsNullOrWhiteSpace(server)) return false;
+            string s = server.Trim().ToLowerInvariant();
+            return s.Contains("firebaseio.com") || s.Contains("firebasedatabase.app");
+        }
+
+        public static string NormalizeServerUrl(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return "https://ntfy.adminforge.de";
+            string s = raw.Trim().TrimEnd('/');
+            if (!s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                !s.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                s = "https://" + s;
+            }
+            if (s.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            {
+                s = s.Substring(0, s.Length - 5).TrimEnd('/');
+            }
+            return s;
+        }
+
+        private static string GetFirebaseUrl(string server, string channel, string node)
+        {
+            string baseUrl = NormalizeServerUrl(server);
+            return baseUrl + "/vzpenjaca/" + SanitizeChannel(channel) + "/" + node + ".json";
+        }
+
         public string StateTopic
         {
             get { return SanitizeChannel(_config.CloudChannelId) + "-state"; }
@@ -2107,10 +2136,16 @@ namespace VzpenjacaKontrola
             if (!_config.CloudRelayEnabled) return;
 
             DateTime now = DateTime.UtcNow;
-            // Mobile app sends a "sync" heartbeat on open and every 90s while active.
-            // Do not publish continuous turnstile updates when no mobile client is active.
+            string server = NormalizeServerUrl(_config.CloudRelayServer);
+            bool isFirebase = IsFirebaseServer(server);
+
+            // For ntfy, only publish continuous turnstile updates when mobile client was recently active.
+            // For Firebase Realtime Database, quota is 20,000+ writes/day and 1GB storage (overwriting 150B JSON),
+            // so we can keep state fresh even before the mobile app sends a sync command, plus faster 1.2s updates when active!
             bool mobileRecentlyActive = (now - _lastMobileActiveUtc).TotalSeconds < 135.0;
-            if (!mobileRecentlyActive) return;
+            if (!isFirebase && !mobileRecentlyActive) return;
+
+            double minIntervalMs = isFirebase ? (mobileRecentlyActive ? 1200.0 : 5000.0) : 3500.0;
 
             string sig = BuildStateSignature();
             bool sigChanged = (sig != _lastStateSignature);
@@ -2118,13 +2153,13 @@ namespace VzpenjacaKontrola
             if (significantChange || sigChanged)
             {
                 double elapsedMs = (now - _lastPublishUtc).TotalMilliseconds;
-                if (elapsedMs >= 3500.0)
+                if (elapsedMs >= minIntervalMs)
                 {
                     Task.Run(() => PublishStateAsync(false));
                 }
                 else if (Interlocked.CompareExchange(ref _trailingPublishScheduled, 1, 0) == 0)
                 {
-                    int delayMs = Math.Max(400, (int)(3500.0 - elapsedMs) + 100);
+                    int delayMs = Math.Max(300, (int)(minIntervalMs - elapsedMs) + 80);
                     Task.Run(async () =>
                     {
                         try
@@ -2135,7 +2170,7 @@ namespace VzpenjacaKontrola
                         {
                             Interlocked.Exchange(ref _trailingPublishScheduled, 0);
                         }
-                        if ((DateTime.UtcNow - _lastMobileActiveUtc).TotalSeconds < 135.0)
+                        if (isFirebase || (DateTime.UtcNow - _lastMobileActiveUtc).TotalSeconds < 135.0)
                         {
                             await PublishStateAsync(false).ConfigureAwait(false);
                         }
@@ -2167,8 +2202,12 @@ namespace VzpenjacaKontrola
         {
             if (!_config.CloudRelayEnabled) return false;
 
+            string server = NormalizeServerUrl(_config.CloudRelayServer);
+            bool isFirebase = IsFirebaseServer(server);
+            double minThrottleMs = isFirebase ? 1000.0 : 3200.0;
+
             DateTime now = DateTime.UtcNow;
-            if (!force && (now - _lastPublishUtc).TotalMilliseconds < 3200)
+            if (!force && (now - _lastPublishUtc).TotalMilliseconds < minThrottleMs)
                 return false;
 
             int lockTimeoutMs = force ? 5000 : 0;
@@ -2196,12 +2235,13 @@ namespace VzpenjacaKontrola
                     _cardSpodaj.RemainingMs,
                     _cardSpodaj.SetMs);
 
-                string server = string.IsNullOrEmpty(_config.CloudRelayServer) ? "https://ntfy.adminforge.de" : _config.CloudRelayServer.TrimEnd('/');
-                string url = server + "/" + StateTopic;
+                string url = isFirebase
+                    ? GetFirebaseUrl(server, _config.CloudChannelId, "state")
+                    : (server + "/" + StateTopic);
 
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
-                req.Method = "POST";
-                req.ContentType = "text/plain; charset=utf-8";
+                req.Method = isFirebase ? "PUT" : "POST";
+                req.ContentType = isFirebase ? "application/json; charset=utf-8" : "text/plain; charset=utf-8";
                 req.Timeout = 6000;
                 req.ReadWriteTimeout = 6000;
                 req.KeepAlive = true;
@@ -2222,9 +2262,17 @@ namespace VzpenjacaKontrola
             catch (WebException wex)
             {
                 HttpWebResponse httpResp = wex.Response as HttpWebResponse;
-                if (httpResp != null && (int)httpResp.StatusCode == 429)
+                if (httpResp != null)
                 {
-                    UpdateStatus("Omejitev strežnika (429) — zamenjajte strežnik");
+                    int code = (int)httpResp.StatusCode;
+                    if (code == 429)
+                    {
+                        UpdateStatus("Omejitev strežnika (429) — uporabite Firebase URL");
+                    }
+                    else if (code == 401 || code == 403)
+                    {
+                        UpdateStatus("Firebase dostop zavrnjen (" + code + ") — preverite Rules");
+                    }
                 }
                 return false;
             }
@@ -2247,26 +2295,31 @@ namespace VzpenjacaKontrola
                 bool failed = false;
                 try
                 {
-                    string server = string.IsNullOrEmpty(_config.CloudRelayServer) ? "https://ntfy.adminforge.de" : _config.CloudRelayServer.TrimEnd('/');
-                    string streamUrl = server + "/" + CommandTopic + (hasConnectedOnce ? "/json?since=15s" : "/json");
+                    string server = NormalizeServerUrl(_config.CloudRelayServer);
+                    bool isFirebase = IsFirebaseServer(server);
+                    string streamUrl = isFirebase
+                        ? GetFirebaseUrl(server, _config.CloudChannelId, "cmd")
+                        : (server + "/" + CommandTopic + (hasConnectedOnce ? "/json?since=15s" : "/json"));
 
-                    UpdateStatus("Povezovanje v oblak...");
+                    UpdateStatus(isFirebase ? "Povezovanje v Firebase..." : "Povezovanje v oblak...");
                     req = (HttpWebRequest)WebRequest.Create(streamUrl);
                     req.Method = "GET";
-                    req.Accept = "application/x-ndjson, application/json";
+                    req.Accept = isFirebase ? "text/event-stream" : "application/x-ndjson, application/json";
                     req.Timeout = 15000;
                     req.ReadWriteTimeout = 75000;
                     req.AllowReadStreamBuffering = false;
 
-                    using ( token.Register(() => { try { req.Abort(); } catch { } }) )
+                    using (token.Register(() => { try { req.Abort(); } catch { } }))
                     using (WebResponse resp = await req.GetResponseAsync().ConfigureAwait(false))
                     using (Stream stream = resp.GetResponseStream())
                     using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
                     {
                         hasConnectedOnce = true;
                         IsConnected = true;
-                        UpdateStatus("Povezano (" + SanitizeChannel(_config.CloudChannelId) + ")");
+                        string providerLabel = isFirebase ? "Firebase" : "Oblak";
+                        UpdateStatus(providerLabel + " povezano (" + SanitizeChannel(_config.CloudChannelId) + ")");
 
+                        string currentSseEvent = "";
                         while (!token.IsCancellationRequested)
                         {
                             Task<string> readTask = reader.ReadLineAsync();
@@ -2281,8 +2334,39 @@ namespace VzpenjacaKontrola
                             if (line == null) break;
                             string trimmed = line.Trim();
                             if (trimmed.Length == 0) continue;
-                            await HandleIncomingStreamLineAsync(trimmed).ConfigureAwait(false);
+
+                            if (isFirebase)
+                            {
+                                if (trimmed.StartsWith("event:", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    currentSseEvent = trimmed.Substring(6).Trim();
+                                }
+                                else if (trimmed.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    string dataJson = trimmed.Substring(5).Trim();
+                                    if ((string.Equals(currentSseEvent, "put", StringComparison.OrdinalIgnoreCase) ||
+                                         string.Equals(currentSseEvent, "patch", StringComparison.OrdinalIgnoreCase)) &&
+                                        !string.IsNullOrEmpty(dataJson) && dataJson != "null")
+                                    {
+                                        await HandleFirebaseCommandSseDataAsync(server, dataJson).ConfigureAwait(false);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                await HandleIncomingStreamLineAsync(trimmed).ConfigureAwait(false);
+                            }
                         }
+                    }
+                }
+                catch (WebException wex)
+                {
+                    IsConnected = false;
+                    failed = true;
+                    HttpWebResponse httpResp = wex.Response as HttpWebResponse;
+                    if (httpResp != null && ((int)httpResp.StatusCode == 401 || (int)httpResp.StatusCode == 403))
+                    {
+                        UpdateStatus("Firebase dostop zavrnjen — omogočite .read/.write v Rules");
                     }
                 }
                 catch
@@ -2297,6 +2381,71 @@ namespace VzpenjacaKontrola
                     await Task.Delay(2500).ConfigureAwait(false);
                 }
             }
+        }
+
+        private async Task ClearFirebaseCommandNodeAsync(string server)
+        {
+            try
+            {
+                string url = GetFirebaseUrl(server, _config.CloudChannelId, "cmd");
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "DELETE";
+                req.Timeout = 5000;
+                using (WebResponse resp = await req.GetResponseAsync().ConfigureAwait(false)) { }
+            }
+            catch { }
+        }
+
+        private async Task HandleFirebaseCommandSseDataAsync(string server, string dataJson)
+        {
+            try
+            {
+                // Firebase SSE sends {"path":"/","data":{"station":"zgoraj","cmd":7,"pin":"","ts":1700000000,"id":"..."}}
+                // Ignore if data is null (which happens right after we DELETE the processed command)
+                if (dataJson.IndexOf("\"data\":null", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    dataJson.IndexOf("\"data\": null", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return;
+                }
+
+                string station = ExtractJsonString(dataJson, "station");
+                if (string.IsNullOrEmpty(station)) return;
+
+                string pin = ExtractJsonString(dataJson, "pin");
+                int cmdId = (int)ExtractJsonLong(dataJson, "cmd", -1);
+                long cmdTs = ExtractJsonLong(dataJson, "ts", 0);
+                string msgId = ExtractJsonString(dataJson, "id");
+                if (string.IsNullOrEmpty(msgId) && cmdTs > 0)
+                {
+                    msgId = station + ":" + cmdId.ToString(CultureInfo.InvariantCulture) + ":" + cmdTs.ToString(CultureInfo.InvariantCulture);
+                }
+
+                // Clear the command from Firebase immediately so it is never re-executed on reconnect
+                Task.Run(() => ClearFirebaseCommandNodeAsync(server));
+
+                // Ignore stale commands older than 30 seconds
+                if (cmdTs > 0)
+                {
+                    long nowMs = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+                    if (nowMs - cmdTs > 30000L)
+                    {
+                        return;
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(msgId))
+                {
+                    lock (_processedIds)
+                    {
+                        if (_processedIds.Contains(msgId)) return;
+                        if (_processedIds.Count > 200) _processedIds.Clear();
+                        _processedIds.Add(msgId);
+                    }
+                }
+
+                await ExecuteParsedMobileCommandAsync(station, pin, cmdId).ConfigureAwait(false);
+            }
+            catch { }
         }
 
         private async Task HandleIncomingStreamLineAsync(string line)
@@ -2325,39 +2474,44 @@ namespace VzpenjacaKontrola
                 string pin = ExtractJsonString(innerJson, "pin");
                 int cmdId = (int)ExtractJsonLong(innerJson, "cmd", -1);
 
-                if (!string.IsNullOrEmpty(_config.CloudPin))
-                {
-                    if (!string.Equals(pin ?? "", _config.CloudPin.Trim(), StringComparison.Ordinal))
-                    {
-                        return;
-                    }
-                }
-
-                _lastMobileActiveUtc = DateTime.UtcNow;
-
-                if (string.Equals(station, "sync", StringComparison.OrdinalIgnoreCase) || cmdId == 0)
-                {
-                    await PublishStateAsync(true).ConfigureAwait(false);
-                    return;
-                }
-
-                if (cmdId >= 1 && cmdId <= 11)
-                {
-                    if (string.Equals(station, "zgoraj", StringComparison.OrdinalIgnoreCase))
-                    {
-                        UpdateStatus("Mobilni ukaz: Zgoraj ?" + cmdId);
-                        await _cardZgoraj.ExecuteRemoteCommandAsync(cmdId).ConfigureAwait(false);
-                        await PublishStateAsync(true).ConfigureAwait(false);
-                    }
-                    else if (string.Equals(station, "spodaj", StringComparison.OrdinalIgnoreCase))
-                    {
-                        UpdateStatus("Mobilni ukaz: Spodaj ?" + cmdId);
-                        await _cardSpodaj.ExecuteRemoteCommandAsync(cmdId).ConfigureAwait(false);
-                        await PublishStateAsync(true).ConfigureAwait(false);
-                    }
-                }
+                await ExecuteParsedMobileCommandAsync(station, pin, cmdId).ConfigureAwait(false);
             }
             catch { }
+        }
+
+        private async Task ExecuteParsedMobileCommandAsync(string station, string pin, int cmdId)
+        {
+            if (!string.IsNullOrEmpty(_config.CloudPin))
+            {
+                if (!string.Equals(pin ?? "", _config.CloudPin.Trim(), StringComparison.Ordinal))
+                {
+                    return;
+                }
+            }
+
+            _lastMobileActiveUtc = DateTime.UtcNow;
+
+            if (string.Equals(station, "sync", StringComparison.OrdinalIgnoreCase) || cmdId == 0)
+            {
+                await PublishStateAsync(true).ConfigureAwait(false);
+                return;
+            }
+
+            if (cmdId >= 1 && cmdId <= 11)
+            {
+                if (string.Equals(station, "zgoraj", StringComparison.OrdinalIgnoreCase))
+                {
+                    UpdateStatus("Mobilni ukaz: Zgoraj ?" + cmdId);
+                    await _cardZgoraj.ExecuteRemoteCommandAsync(cmdId).ConfigureAwait(false);
+                    await PublishStateAsync(true).ConfigureAwait(false);
+                }
+                else if (string.Equals(station, "spodaj", StringComparison.OrdinalIgnoreCase))
+                {
+                    UpdateStatus("Mobilni ukaz: Spodaj ?" + cmdId);
+                    await _cardSpodaj.ExecuteRemoteCommandAsync(cmdId).ConfigureAwait(false);
+                    await PublishStateAsync(true).ConfigureAwait(false);
+                }
+            }
         }
 
         private static int FindJsonKeyColon(string json, string key)
@@ -2457,9 +2611,9 @@ namespace VzpenjacaKontrola
             _config = config;
             _bridge = bridge;
 
-            Title = "Mobilni dostop (Oblak) — Vzpenjača";
-            Width = 440;
-            Height = 385;
+            Title = "Mobilni dostop (Firebase / Oblak) — Vzpenjača";
+            Width = 480;
+            Height = 425;
             ResizeMode = ResizeMode.NoResize;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
             Background = ThemePalette.WindowBg;
@@ -2499,6 +2653,22 @@ namespace VzpenjacaKontrola
             };
             root.Children.Add(_chkEnabled);
 
+            root.Children.Add(CreateLabel("Firebase Realtime Database URL (ali ntfy strežnik):"));
+            _txtServer = CreateTextBox(_config.CloudRelayServer);
+            _txtServer.ToolTip = "Primer za Google Firebase: https://ime-projekta-default-rtdb.europe-west1.firebasedatabase.app";
+            root.Children.Add(_txtServer);
+
+            TextBlock hintFirebase = new TextBlock
+            {
+                Text = "Priporočeno: Vpišite vaš Google Firebase Realtime Database URL (.firebasedatabase.app ali .firebaseio.com) za neomejeno delovanje brez dnevnih omejitev.",
+                Foreground = ThemePalette.TextMuted,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 11,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, -6, 0, 10)
+            };
+            root.Children.Add(hintFirebase);
+
             root.Children.Add(CreateLabel("Koda kanala (vpišite isto kodo v Android aplikaciji):"));
             _txtChannel = CreateTextBox(_config.CloudChannelId);
             root.Children.Add(_txtChannel);
@@ -2507,15 +2677,11 @@ namespace VzpenjacaKontrola
             _txtPin = CreateTextBox(_config.CloudPin);
             root.Children.Add(_txtPin);
 
-            root.Children.Add(CreateLabel("Strežnik posrednika (HTTPS):"));
-            _txtServer = CreateTextBox(_config.CloudRelayServer);
-            root.Children.Add(_txtServer);
-
             StackPanel btnRow = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
                 HorizontalAlignment = HorizontalAlignment.Right,
-                Margin = new Thickness(0, 14, 0, 0)
+                Margin = new Thickness(0, 10, 0, 0)
             };
 
             Button btnSyncNow = CreateDialogButton("Pošlji stanje zdaj", false);
@@ -2524,10 +2690,12 @@ namespace VzpenjacaKontrola
             {
                 if (_bridge != null)
                 {
+                    _config.CloudRelayServer = CloudRelayBridge.NormalizeServerUrl(_txtServer.Text);
+                    _config.CloudChannelId = CloudRelayBridge.SanitizeChannel(_txtChannel.Text);
                     bool ok = await _bridge.PublishStateAsync(true);
                     _lblLiveStatus.Text = ok
                         ? "Status: Stanje uspešno poslano v oblak"
-                        : "Status: Napaka pri pošiljanju v oblak";
+                        : "Status: Napaka pri pošiljanju (preverite URL / Rules)";
                 }
             };
 
@@ -2537,8 +2705,7 @@ namespace VzpenjacaKontrola
                 _config.CloudRelayEnabled = _chkEnabled.IsChecked == true;
                 _config.CloudChannelId = CloudRelayBridge.SanitizeChannel(_txtChannel.Text);
                 _config.CloudPin = (_txtPin.Text ?? "").Trim();
-                string srv = (_txtServer.Text ?? "").Trim().TrimEnd('/');
-                _config.CloudRelayServer = string.IsNullOrEmpty(srv) ? "https://ntfy.adminforge.de" : srv;
+                _config.CloudRelayServer = CloudRelayBridge.NormalizeServerUrl(_txtServer.Text);
                 _config.Save();
                 if (_bridge != null) _bridge.Restart();
                 DialogResult = true;

@@ -66,7 +66,7 @@ class MobileConfig(private val context: Context) {
     private val prefs = context.getSharedPreferences("vzpenjaca_prefs", Context.MODE_PRIVATE)
 
     var useCloudRelay: Boolean = true
-    var cloudServer: String = "https://ntfy.adminforge.de"
+    var cloudServer: String = "https://vzpenjaca-kontrola-default-rtdb.europe-west1.firebasedatabase.app"
     var cloudChannelId: String = "vzpenjaca-3436"
     var cloudPin: String = ""
     var ipZgoraj: String = "10.12.220.34"
@@ -127,13 +127,40 @@ class MobileConfig(private val context: Context) {
             .apply()
     }
 
+    val isFirebase: Boolean
+        get() = isFirebaseServer(cloudServer)
+
     val stateTopic: String
         get() = "${sanitizeChannel(cloudChannelId)}-state"
 
     val commandTopic: String
         get() = "${sanitizeChannel(cloudChannelId)}-cmd"
 
+    fun firebaseUrl(node: String): String {
+        val base = normalizeServerUrl(cloudServer)
+        return "$base/vzpenjaca/${sanitizeChannel(cloudChannelId)}/$node.json"
+    }
+
     companion object {
+        fun isFirebaseServer(server: String): Boolean {
+            val s = server.trim().lowercase(Locale.ROOT)
+            return s.contains("firebaseio.com") || s.contains("firebasedatabase.app")
+        }
+
+        fun normalizeServerUrl(raw: String): String {
+            val trimmed = raw.trim().trimEnd('/')
+            if (trimmed.isEmpty()) return "https://ntfy.adminforge.de"
+            var s = if (!trimmed.startsWith("http://", ignoreCase = true) && !trimmed.startsWith("https://", ignoreCase = true)) {
+                "https://$trimmed"
+            } else {
+                trimmed
+            }
+            if (s.endsWith(".json", ignoreCase = true)) {
+                s = s.substring(0, s.length - 5).trimEnd('/')
+            }
+            return s
+        }
+
         fun sanitizeChannel(raw: String): String {
             val cleaned = raw.trim().lowercase(Locale.ROOT).filter {
                 (it in 'a'..'z') || (it in '0'..'9') || it == '-' || it == '_'
@@ -745,26 +772,40 @@ class MainActivity : Activity() {
         ioExecutor.execute {
             var conn: HttpURLConnection? = null
             try {
-                val url = URL("${config.cloudServer}/${config.stateTopic}/json?poll=1&since=12h")
-                conn = (url.openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 6000
-                    readTimeout = 6000
-                }
-                BufferedReader(InputStreamReader(conn.inputStream, StandardCharsets.UTF_8)).use { reader ->
-                    var latestMessageJson: String? = null
-                    while (true) {
-                        val line = reader.readLine() ?: break
-                        val trimmed = line.trim()
-                        if (trimmed.isEmpty()) continue
-                        val obj = JSONObject(trimmed)
-                        if (obj.optString("event") == "message") {
-                            val msg = obj.optString("message", "")
-                            if (msg.isNotEmpty()) latestMessageJson = msg
-                        }
+                if (config.isFirebase) {
+                    val url = URL(config.firebaseUrl("state"))
+                    conn = (url.openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 6000
+                        readTimeout = 6000
+                        setRequestProperty("Accept", "application/json")
                     }
-                    if (latestMessageJson != null) {
-                        applyCloudStatePayload(latestMessageJson, fromCache = true)
+                    val body = BufferedReader(InputStreamReader(conn.inputStream, StandardCharsets.UTF_8)).use { it.readText().trim() }
+                    if (body.isNotEmpty() && body != "null" && body.startsWith("{")) {
+                        applyCloudStatePayload(body, fromCache = true)
+                    }
+                } else {
+                    val url = URL("${config.cloudServer}/${config.stateTopic}/json?poll=1&since=12h")
+                    conn = (url.openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = 6000
+                        readTimeout = 6000
+                    }
+                    BufferedReader(InputStreamReader(conn.inputStream, StandardCharsets.UTF_8)).use { reader ->
+                        var latestMessageJson: String? = null
+                        while (true) {
+                            val line = reader.readLine() ?: break
+                            val trimmed = line.trim()
+                            if (trimmed.isEmpty()) continue
+                            val obj = JSONObject(trimmed)
+                            if (obj.optString("event") == "message") {
+                                val msg = obj.optString("message", "")
+                                if (msg.isNotEmpty()) latestMessageJson = msg
+                            }
+                        }
+                        if (latestMessageJson != null) {
+                            applyCloudStatePayload(latestMessageJson, fromCache = true)
+                        }
                     }
                 }
             } catch (_: Throwable) {
@@ -780,29 +821,60 @@ class MainActivity : Activity() {
             while (streamActive.get()) {
                 var conn: HttpURLConnection? = null
                 try {
-                    val url = URL("${config.cloudServer}/${config.stateTopic}/json")
+                    val isFirebase = config.isFirebase
+                    val url = if (isFirebase) {
+                        URL(config.firebaseUrl("state"))
+                    } else {
+                        URL("${config.cloudServer}/${config.stateTopic}/json")
+                    }
                     conn = (url.openConnection() as HttpURLConnection).apply {
                         requestMethod = "GET"
                         connectTimeout = 10000
                         readTimeout = 75000
-                        setRequestProperty("Accept", "application/x-ndjson, application/json")
+                        setRequestProperty(
+                            "Accept",
+                            if (isFirebase) "text/event-stream" else "application/x-ndjson, application/json"
+                        )
                     }
                     activeStreamConnection = conn
 
                     BufferedReader(InputStreamReader(conn.inputStream, StandardCharsets.UTF_8)).use { reader ->
+                        val modeLabel = if (isFirebase) "Firebase" else "Oblak"
                         updateTopStatus(
-                            "Povezano v oblak (${config.cloudChannelId})",
+                            "$modeLabel povezano (${config.cloudChannelId})",
                             ThemeColors.AccentEmerald
                         )
+                        var currentSseEvent = ""
+                        var isFirstFirebasePut = true
                         while (streamActive.get()) {
                             val line = reader.readLine() ?: break
                             val trimmed = line.trim()
                             if (trimmed.isEmpty()) continue
-                            val obj = JSONObject(trimmed)
-                            if (obj.optString("event") == "message") {
-                                val msg = obj.optString("message", "")
-                                if (msg.isNotEmpty()) {
-                                    applyCloudStatePayload(msg, fromCache = false)
+
+                            if (isFirebase) {
+                                if (trimmed.startsWith("event:", ignoreCase = true)) {
+                                    currentSseEvent = trimmed.substring(6).trim()
+                                } else if (trimmed.startsWith("data:", ignoreCase = true)) {
+                                    val dataStr = trimmed.substring(5).trim()
+                                    if ((currentSseEvent.equals("put", ignoreCase = true) ||
+                                            currentSseEvent.equals("patch", ignoreCase = true)) &&
+                                        dataStr.isNotEmpty() && dataStr != "null"
+                                    ) {
+                                        val wrapper = JSONObject(dataStr)
+                                        val dataObj = wrapper.optJSONObject("data")
+                                        if (dataObj != null) {
+                                            applyCloudStatePayload(dataObj.toString(), fromCache = isFirstFirebasePut)
+                                            isFirstFirebasePut = false
+                                        }
+                                    }
+                                }
+                            } else {
+                                val obj = JSONObject(trimmed)
+                                if (obj.optString("event") == "message") {
+                                    val msg = obj.optString("message", "")
+                                    if (msg.isNotEmpty()) {
+                                        applyCloudStatePayload(msg, fromCache = false)
+                                    }
                                 }
                             }
                         }
@@ -841,20 +913,30 @@ class MainActivity : Activity() {
     private fun sendCloudCommand(station: String, cmdId: Int): Boolean {
         var conn: HttpURLConnection? = null
         return try {
+            val nowMs = System.currentTimeMillis()
             val payload = JSONObject().apply {
+                put("id", "$nowMs-${(1000..9999).random()}")
                 put("station", station)
                 put("cmd", cmdId)
                 put("pin", config.cloudPin)
-                put("ts", System.currentTimeMillis())
+                put("ts", nowMs)
             }.toString()
 
-            val url = URL("${config.cloudServer}/${config.commandTopic}")
+            val isFirebase = config.isFirebase
+            val url = if (isFirebase) {
+                URL(config.firebaseUrl("cmd"))
+            } else {
+                URL("${config.cloudServer}/${config.commandTopic}")
+            }
             conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
+                requestMethod = if (isFirebase) "PUT" else "POST"
                 doOutput = true
                 connectTimeout = 6000
                 readTimeout = 6000
-                setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+                setRequestProperty(
+                    "Content-Type",
+                    if (isFirebase) "application/json; charset=utf-8" else "text/plain; charset=utf-8"
+                )
             }
             val bytes = payload.toByteArray(StandardCharsets.UTF_8)
             conn.outputStream.use { out ->
@@ -906,8 +988,9 @@ class MainActivity : Activity() {
             )
 
             uiHandler.post {
+                val modeLabel = if (config.isFirebase) "Firebase" else "Oblak"
                 updateTopStatus(
-                    "Oblak aktiven (${config.cloudChannelId})",
+                    "$modeLabel aktiven (${config.cloudChannelId})",
                     ThemeColors.AccentEmerald
                 )
                 if (zState.isOnline) {
@@ -950,6 +1033,12 @@ class MainActivity : Activity() {
         modeGroup.addView(rbLan)
         container.addView(modeGroup)
 
+        container.addView(createSettingsLabel("Firebase Realtime Database URL (ali ntfy strežnik):"))
+        val edtServer = createSettingsInput(config.cloudServer).apply {
+            hint = "https://ime-projekta-default-rtdb.europe-west1.firebasedatabase.app"
+        }
+        container.addView(edtServer)
+
         container.addView(createSettingsLabel("Koda kanala (ista kot v PC aplikaciji Vzpenjača):"))
         val edtChannel = createSettingsInput(config.cloudChannelId)
         container.addView(edtChannel)
@@ -959,10 +1048,6 @@ class MainActivity : Activity() {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
         container.addView(edtPin)
-
-        container.addView(createSettingsLabel("Strežnik oblačnega posrednika:"))
-        val edtServer = createSettingsInput(config.cloudServer)
-        container.addView(edtServer)
 
         container.addView(createSettingsLabel("IP Zgornja postaja (za neposredni LAN način):"))
         val edtIpZgoraj = createSettingsInput(config.ipZgoraj)
@@ -995,8 +1080,7 @@ class MainActivity : Activity() {
                 config.useCloudRelay = rbCloud.isChecked
                 config.cloudChannelId = MobileConfig.sanitizeChannel(edtChannel.text.toString())
                 config.cloudPin = edtPin.text.toString().trim()
-                val srv = edtServer.text.toString().trim().trimEnd('/')
-                config.cloudServer = if (srv.isNotEmpty()) srv else "https://ntfy.adminforge.de"
+                config.cloudServer = MobileConfig.normalizeServerUrl(edtServer.text.toString())
                 config.ipZgoraj = edtIpZgoraj.text.toString().trim().ifEmpty { "10.12.220.34" }
                 config.ipSpodaj = edtIpSpodaj.text.toString().trim().ifEmpty { "10.12.220.36" }
                 config.soundEnabled = chkSound.isChecked
