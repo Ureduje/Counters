@@ -112,6 +112,7 @@ class MobileConfig(private val context: Context) {
     var dimSpodaj: Boolean = false
     var showIntervalBgZgoraj: Boolean = true
     var showIntervalBgSpodaj: Boolean = true
+    var rideDurationSec: Int = 90
 
     init {
         load()
@@ -149,6 +150,7 @@ class MobileConfig(private val context: Context) {
         if (prefs.contains("dimSpodaj")) dimSpodaj = prefs.getBoolean("dimSpodaj", false)
         if (prefs.contains("showIntervalBgZgoraj")) showIntervalBgZgoraj = prefs.getBoolean("showIntervalBgZgoraj", true)
         if (prefs.contains("showIntervalBgSpodaj")) showIntervalBgSpodaj = prefs.getBoolean("showIntervalBgSpodaj", true)
+        if (prefs.contains("rideDurationSec")) rideDurationSec = prefs.getInt("rideDurationSec", 90).coerceIn(10, 600)
     }
 
     fun save() {
@@ -170,6 +172,7 @@ class MobileConfig(private val context: Context) {
             .putBoolean("dimSpodaj", dimSpodaj)
             .putBoolean("showIntervalBgZgoraj", showIntervalBgZgoraj)
             .putBoolean("showIntervalBgSpodaj", showIntervalBgSpodaj)
+            .putInt("rideDurationSec", rideDurationSec.coerceIn(10, 600))
             .apply()
     }
 
@@ -1325,6 +1328,7 @@ class MainActivity : Activity() {
         root.addView(topBar)
 
         // Separate Zgornja postaja and Spodnja postaja views (one view fits screen, swipe up/down to switch)
+        StationCardView.rideDurationSec = config.rideDurationSec
         cardZgoraj = StationCardView(
             context = this,
             stationId = "zgoraj",
@@ -1375,7 +1379,12 @@ class MainActivity : Activity() {
             onStationChanged = { index ->
                 updateActiveStationTitle(index)
             }
+            onFooterClicked = {
+                showSettingsDialog()
+            }
         }
+        val initMode = if (config.useCloudRelay) "Firebase · ${config.cloudChannelId}" else "LAN · ${config.ipZgoraj} / ${config.ipSpodaj}"
+        stationPager.updateFooterStatus(isConnected = false, modeInfo = "Povezovanje... ($initMode)")
         root.addView(stationPager)
         updateActiveStationTitle(0)
 
@@ -1545,6 +1554,14 @@ class MainActivity : Activity() {
                 lblModeStatus.setTextColor(ThemeColors.AccentRed)
                 (statusBadgeDot.background as? GradientDrawable)?.setColor(ThemeColors.AccentRed)
                 statusRow.visibility = View.VISIBLE
+            }
+            if (::stationPager.isInitialized) {
+                val mode = if (config.useCloudRelay) {
+                    if (isConnected) "Firebase · ${config.cloudChannelId}" else "Ni povezave (Firebase)"
+                } else {
+                    if (isConnected) "LAN · ${config.ipZgoraj} / ${config.ipSpodaj}" else "Ni povezave (LAN)"
+                }
+                stationPager.updateFooterStatus(isConnected, mode)
             }
         }
     }
@@ -1922,6 +1939,70 @@ class MainActivity : Activity() {
         }
         container.addView(chkSound)
 
+        // Trajanje vožnje vzpenjače
+        val rideDivider = View(this).apply {
+            setBackgroundColor(ThemeColors.Divider)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)).apply {
+                topMargin = dp(12)
+                bottomMargin = dp(10)
+            }
+        }
+        container.addView(rideDivider)
+
+        val lblRideTitle = TextView(this).apply {
+            text = "Trajanje vožnje vzpenjače"
+            setTextColor(ThemeColors.TextPrimary)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(0, 0, 0, dp(2))
+        }
+        container.addView(lblRideTitle)
+
+        val lblRideSub = TextView(this).apply {
+            text = "Čas vožnje v sekundah za animacijo položaja kabine na tirih:"
+            setTextColor(ThemeColors.TextMuted)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(0, 0, 0, dp(6))
+        }
+        container.addView(lblRideSub)
+
+        val rideRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(2), 0, dp(6))
+        }
+        val edtRideDuration = createSettingsInput(config.rideDurationSec.toString()).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(dp(80), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                rightMargin = dp(8)
+            }
+        }
+        val lblSecUnit = TextView(this).apply {
+            text = "sekund"
+            setTextColor(ThemeColors.TextPrimary)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        }
+        rideRow.addView(edtRideDuration)
+        rideRow.addView(lblSecUnit)
+        container.addView(rideRow)
+
+        val presetRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(4))
+        }
+        val presets = listOf(60, 75, 90, 105, 120)
+        for (p in presets) {
+            val btn = createDialogMiniButton("${p}s") {
+                edtRideDuration.setText(p.toString())
+            }.apply {
+                (layoutParams as? LinearLayout.LayoutParams)?.rightMargin = dp(6)
+            }
+            presetRow.addView(btn)
+        }
+        container.addView(presetRow)
+
         // Section divider for Obvestilo ob odhodu
         val sectionDivider = View(this).apply {
             setBackgroundColor(ThemeColors.Divider)
@@ -2074,6 +2155,12 @@ class MainActivity : Activity() {
                 val tpl = edtVoiceTemplate.text.toString().replace("\r", " ").replace("\n", " ").trim()
                 config.voiceAnnouncementTemplate = tpl.ifEmpty { MobileConfig.DEFAULT_VOICE_TEMPLATE }
                 config.voiceAnnouncementGain = currentGain
+
+                val parsedDuration = edtRideDuration.text.toString().trim().toIntOrNull() ?: 90
+                config.rideDurationSec = parsedDuration.coerceIn(10, 600)
+                StationCardView.rideDurationSec = config.rideDurationSec
+                cardZgoraj.syncSingleFunicularPosition()
+                cardSpodaj.syncSingleFunicularPosition()
 
                 MobileChimePlayer.enabled = config.soundEnabled
                 MobileVoiceAnnouncer.voiceEnabled = config.voiceAnnouncementEnabled
@@ -2327,10 +2414,13 @@ class VerticalStationPager(
 ) : LinearLayout(context) {
 
     private val cardStage: FrameLayout
-    private val pillZgoraj: TextView
-    private val pillSpodaj: TextView
     private var currentIndex: Int = 0 // 0 = Zgornja postaja, 1 = Spodnja postaja
     var onStationChanged: ((Int) -> Unit)? = null
+    var onFooterClicked: (() -> Unit)? = null
+
+    private val footerDot: View
+    private val footerStatusText: TextView
+    private val footerVersionText: TextView
 
     private val touchSlop: Int = ViewConfiguration.get(context).scaledTouchSlop
     private var downX: Float = 0f
@@ -2340,7 +2430,7 @@ class VerticalStationPager(
 
     init {
         orientation = VERTICAL
-        setPadding(dp(12), dp(2), dp(12), dp(8))
+        setPadding(dp(12), dp(2), dp(12), dp(2))
 
         cardStage = FrameLayout(context).apply {
             clipChildren = true
@@ -2362,71 +2452,68 @@ class VerticalStationPager(
         cardStage.addView(cardSpodaj)
         addView(cardStage)
 
-        // Compact swipe/station switcher indicator bar at bottom
-        val indicatorBar = LinearLayout(context).apply {
+        // Footer where the podrsaj row was: connection & system status + version
+        val footerBar = LinearLayout(context).apply {
             orientation = HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, dp(2))
-            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        }
-
-        pillZgoraj = createIndicatorPill("▲ ZGORNJA") {
-            if (currentIndex != 0) switchToStation(0, animateDown = true)
-        }
-        val swipeHint = TextView(context).apply {
-            text = "⇅ podrsaj"
-            setTextColor(ThemeColors.TextMuted)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            setPadding(dp(12), 0, dp(12), 0)
-        }
-        pillSpodaj = createIndicatorPill("SPODNJA ▼") {
-            if (currentIndex != 1) switchToStation(1, animateDown = false)
-        }
-
-        indicatorBar.addView(pillZgoraj)
-        indicatorBar.addView(swipeHint)
-        indicatorBar.addView(pillSpodaj)
-        addView(indicatorBar)
-
-        updateIndicatorVisuals()
-    }
-
-    private fun createIndicatorPill(label: String, onClick: () -> Unit): TextView {
-        return TextView(context).apply {
-            text = label
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(dp(10), dp(4), dp(10), dp(4))
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(4), dp(4), dp(2))
+            layoutParams = LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
             setOnClickListener {
                 it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-                onClick()
+                onFooterClicked?.invoke()
             }
         }
+
+        val footerLeft = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        footerDot = View(context).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(ThemeColors.AccentCoral)
+            }
+            layoutParams = LayoutParams(dp(6), dp(6)).apply {
+                rightMargin = dp(6)
+            }
+        }
+
+        footerStatusText = TextView(context).apply {
+            text = "Povezovanje..."
+            setTextColor(ThemeColors.TextMuted)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
+        }
+
+        footerLeft.addView(footerDot)
+        footerLeft.addView(footerStatusText)
+
+        footerVersionText = TextView(context).apply {
+            text = "v1.2.0"
+            setTextColor(ThemeColors.TextMuted)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+        }
+
+        footerBar.addView(footerLeft)
+        footerBar.addView(footerVersionText)
+        addView(footerBar)
     }
 
-    private fun updateIndicatorVisuals() {
-        val activeBg = GradientDrawable().apply {
-            cornerRadius = dp(10).toFloat()
-            setColor(ThemeColors.AccentBlueActiveBg)
-            setStroke(dp(1), ThemeColors.AccentBlue)
-        }
-        val inactiveBg = GradientDrawable().apply {
-            cornerRadius = dp(10).toFloat()
-            setColor(ThemeColors.CardBg)
-            setStroke(dp(1), ThemeColors.CardBorder)
-        }
-
-        if (currentIndex == 0) {
-            pillZgoraj.background = activeBg
-            pillZgoraj.setTextColor(ThemeColors.AccentBlue)
-            pillSpodaj.background = inactiveBg
-            pillSpodaj.setTextColor(ThemeColors.TextSecondary)
-        } else {
-            pillZgoraj.background = inactiveBg
-            pillZgoraj.setTextColor(ThemeColors.TextSecondary)
-            pillSpodaj.background = activeBg
-            pillSpodaj.setTextColor(ThemeColors.AccentBlue)
-        }
+    fun updateFooterStatus(isConnected: Boolean, modeInfo: String) {
+        (footerDot.background as? GradientDrawable)?.setColor(
+            if (isConnected) ThemeColors.AccentEmerald else ThemeColors.AccentCoral
+        )
+        footerStatusText.text = modeInfo
+        footerStatusText.setTextColor(
+            if (isConnected) ThemeColors.TextSecondary else ThemeColors.AccentCoral
+        )
     }
 
     override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
@@ -2524,7 +2611,6 @@ class VerticalStationPager(
         val outgoing = if (currentIndex == 0) cardZgoraj else cardSpodaj
         val incoming = if (targetIndex == 0) cardZgoraj else cardSpodaj
         currentIndex = targetIndex
-        updateIndicatorVisuals()
         onStationChanged?.invoke(currentIndex)
 
         val shift = (if (cardStage.height > 0) cardStage.height else dp(320)) * 0.22f
@@ -3333,7 +3419,8 @@ class StationCardView(
      * same state to both Zgornja and Spodnja views so the single car is never in two places at once.
      */
     fun syncSingleFunicularPosition() {
-        val rideDurationMs = 90_000L
+        val totalSec = rideDurationSec.coerceIn(10, 600)
+        val rideDurationMs = totalSec * 1000L
         val spodajCard = if (stationId == "spodaj") this else peerCard
         val zgorajCard = if (stationId == "zgoraj") this else peerCard
 
@@ -3346,8 +3433,8 @@ class StationCardView(
         val zSet = zgorajCard?.currentSetMs ?: 0L
 
         if (!sOnline && !zOnline) {
-            spodajCard?.funicularTrackView?.setRideState(false, false, true, lastKnownSingleCarPos, 0L)
-            zgorajCard?.funicularTrackView?.setRideState(false, false, true, lastKnownSingleCarPos, 0L)
+            spodajCard?.funicularTrackView?.setRideState(false, false, true, lastKnownSingleCarPos, 0L, totalSec)
+            zgorajCard?.funicularTrackView?.setRideState(false, false, true, lastKnownSingleCarPos, 0L, totalSec)
             return
         }
 
@@ -3378,10 +3465,10 @@ class StationCardView(
             // Departure from Zgornja: 1.0 (Zgornja) -> 0.0 (Spodnja)
             val pos = if (isFromSpodnja) progress else (1f - progress)
             lastKnownSingleCarPos = pos
-            spodajCard?.funicularTrackView?.setRideState(true, true, isFromSpodnja, pos, activeElapsed)
-            zgorajCard?.funicularTrackView?.setRideState(true, true, isFromSpodnja, pos, activeElapsed)
+            spodajCard?.funicularTrackView?.setRideState(true, true, isFromSpodnja, pos, activeElapsed, totalSec)
+            zgorajCard?.funicularTrackView?.setRideState(true, true, isFromSpodnja, pos, activeElapsed, totalSec)
         } else {
-            // Ride completed (>90s) or waiting at station:
+            // Ride completed (>rideDurationMs) or waiting at station:
             // After departing Spodnja (0->1), car rests at Zgornja (1.0f).
             // After departing Zgornja (1->0), car rests at Spodnja (0.0f).
             val dockedPos = if (activeElapsed > rideDurationMs) {
@@ -3390,12 +3477,14 @@ class StationCardView(
                 lastKnownSingleCarPos
             }
             lastKnownSingleCarPos = dockedPos
-            spodajCard?.funicularTrackView?.setRideState(true, false, isFromSpodnja, dockedPos, 0L)
-            zgorajCard?.funicularTrackView?.setRideState(true, false, isFromSpodnja, dockedPos, 0L)
+            spodajCard?.funicularTrackView?.setRideState(true, false, isFromSpodnja, dockedPos, 0L, totalSec)
+            zgorajCard?.funicularTrackView?.setRideState(true, false, isFromSpodnja, dockedPos, 0L, totalSec)
         }
     }
 
     companion object {
+        @Volatile
+        var rideDurationSec: Int = 90
         @Volatile
         private var lastDepartedStationId: String = "zgoraj"
         @Volatile
@@ -3524,6 +3613,7 @@ class FunicularTrackView(
     private var targetPos: Float = 0f
     private var displayPos: Float = 0f
     private var rideElapsedMs: Long = 0L
+    private var totalRideDurationSec: Int = 90
     private var hasInitializedPos: Boolean = false
 
     init {
@@ -3535,7 +3625,8 @@ class FunicularTrackView(
         riding: Boolean,
         leftToRight: Boolean,
         targetFraction: Float,
-        elapsedMs: Long
+        elapsedMs: Long,
+        totalDurationSec: Int = 90
     ) {
         val clamped = targetFraction.coerceIn(0f, 1f)
         this.isOnline = online
@@ -3543,6 +3634,7 @@ class FunicularTrackView(
         this.leftToRight = leftToRight
         this.targetPos = clamped
         this.rideElapsedMs = elapsedMs
+        this.totalRideDurationSec = totalDurationSec.coerceAtLeast(10)
 
         if (!hasInitializedPos || !riding || abs(clamped - displayPos) > 0.15f) {
             displayPos = clamped
@@ -3597,36 +3689,13 @@ class FunicularTrackView(
         }
         canvas.drawText("ZGORNJA", w - padX, headerBaselineY, labelPaint)
 
-        val statusStr: String
-        when {
-            !isOnline -> {
-                statusStr = "--"
-                statusPaint.color = ThemeColors.TextMuted
-            }
-            isRiding -> {
-                val sec = (rideElapsedMs / 1000L).coerceIn(0L, 90L)
-                if (leftToRight) {
-                    statusStr = "▶ ${sec}s / 90s"
-                    statusPaint.color = ThemeColors.AccentEmerald
-                } else {
-                    statusStr = "◀ ${sec}s / 90s"
-                    statusPaint.color = ThemeColors.AccentBlue
-                }
-            }
-            atSpodnja -> {
-                statusStr = "Spodnja postaja"
-                statusPaint.color = ThemeColors.TextSecondary
-            }
-            atZgornja -> {
-                statusStr = "Zgornja postaja"
-                statusPaint.color = ThemeColors.TextSecondary
-            }
-            else -> {
-                statusStr = "Na postaji"
-                statusPaint.color = ThemeColors.TextSecondary
-            }
+        if (isRiding) {
+            val maxSec = totalRideDurationSec.toLong()
+            val sec = (rideElapsedMs / 1000L).coerceIn(0L, maxSec)
+            val statusStr = if (leftToRight) "▶ ${sec}s / ${maxSec}s" else "◀ ${sec}s / ${maxSec}s"
+            statusPaint.color = if (leftToRight) ThemeColors.AccentEmerald else ThemeColors.AccentBlue
+            canvas.drawText(statusStr, w * 0.5f, headerBaselineY, statusPaint)
         }
-        canvas.drawText(statusStr, w * 0.5f, headerBaselineY, statusPaint)
 
         // 2. Horizontal Railway Track (Spodnja postaja on left -> Zgornja postaja on right)
         val carHalfW = (h * 0.29f).coerceIn(dpF(12f), dpF(17f))
