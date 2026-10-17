@@ -56,6 +56,9 @@ namespace VzpenjacaKontrola
         public bool HideWindowControls = false;
         public bool SoundEnabled = true;
         public bool VoiceAnnouncementEnabled = true;
+        public const string DefaultVoiceTemplate = "Vzpenjača je odpeljala. Naslednja vožnja je čez {minute}.";
+        public string VoiceAnnouncementTemplate = DefaultVoiceTemplate;
+        public double VoiceAnnouncementGain = 2.0;
         public bool MuteZgoraj = false;
         public bool MuteSpodaj = false;
         public bool DimZgoraj = false;
@@ -143,6 +146,16 @@ namespace VzpenjacaKontrola
                         {
                             cfg.VoiceAnnouncementEnabled = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
                         }
+                        else if (key.Equals("VoiceAnnouncementTemplate", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(val))
+                        {
+                            cfg.VoiceAnnouncementTemplate = val;
+                        }
+                        else if (key.Equals("VoiceAnnouncementGain", StringComparison.OrdinalIgnoreCase))
+                        {
+                            double vg;
+                            if (double.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out vg) && vg >= 0.5 && vg <= 5.0)
+                                cfg.VoiceAnnouncementGain = vg;
+                        }
                         else if (key.Equals("MuteZgoraj", StringComparison.OrdinalIgnoreCase))
                         {
                             cfg.MuteZgoraj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
@@ -217,6 +230,8 @@ namespace VzpenjacaKontrola
                 sb.AppendLine("HideWindowControls=" + (HideWindowControls ? "true" : "false"));
                 sb.AppendLine("SoundEnabled=" + (SoundEnabled ? "true" : "false"));
                 sb.AppendLine("VoiceAnnouncementEnabled=" + (VoiceAnnouncementEnabled ? "true" : "false"));
+                sb.AppendLine("VoiceAnnouncementTemplate=" + (VoiceAnnouncementTemplate ?? DefaultVoiceTemplate).Replace("\r", " ").Replace("\n", " ").Trim());
+                sb.AppendLine("VoiceAnnouncementGain=" + VoiceAnnouncementGain.ToString("0.00", CultureInfo.InvariantCulture));
                 sb.AppendLine("MuteZgoraj=" + (MuteZgoraj ? "true" : "false"));
                 sb.AppendLine("MuteSpodaj=" + (MuteSpodaj ? "true" : "false"));
                 sb.AppendLine("DimZgoraj=" + (DimZgoraj ? "true" : "false"));
@@ -392,6 +407,8 @@ namespace VzpenjacaKontrola
     {
         public static bool Enabled = true;
         public static bool VoiceEnabled = true;
+        public static string VoiceTemplate = AppConfig.DefaultVoiceTemplate;
+        public static double VoiceGain = 2.0;
 
         private static readonly byte[] _wavTimeSingle;
         private static readonly byte[] _wavTimeTriple;
@@ -431,6 +448,37 @@ namespace VzpenjacaKontrola
             PlayWavBuffer(_wavPersonsTriple);
         }
 
+        public static string BuildAnnouncementText(string template, int minutes)
+        {
+            if (minutes <= 0) minutes = 1;
+            string tpl = string.IsNullOrWhiteSpace(template)
+                ? AppConfig.DefaultVoiceTemplate
+                : template.Trim();
+
+            string phrase = FormatSlovenianMinutesPhrase(minutes);
+            return ReplaceCaseInsensitive(
+                ReplaceCaseInsensitive(tpl, "{minute}", phrase),
+                "{min}", phrase);
+        }
+
+        private static string ReplaceCaseInsensitive(string input, string token, string replacement)
+        {
+            if (string.IsNullOrEmpty(input) || string.IsNullOrEmpty(token)) return input;
+            int idx = input.IndexOf(token, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return input;
+            StringBuilder sb = new StringBuilder();
+            int lastIdx = 0;
+            while (idx >= 0)
+            {
+                sb.Append(input, lastIdx, idx - lastIdx);
+                sb.Append(replacement);
+                lastIdx = idx + token.Length;
+                idx = input.IndexOf(token, lastIdx, StringComparison.OrdinalIgnoreCase);
+            }
+            sb.Append(input, lastIdx, input.Length - lastIdx);
+            return sb.ToString();
+        }
+
         public static void SpeakDeparture(int minutes)
         {
             if (!VoiceEnabled) return;
@@ -438,8 +486,14 @@ namespace VzpenjacaKontrola
             if ((now - _lastDepartureSpeechUtc).TotalSeconds < 4.0) return;
             _lastDepartureSpeechUtc = now;
 
-            if (minutes <= 0) minutes = 1;
-            string text = "Vzpenjača je odpeljala. Naslednja vožnja je čez " + FormatSlovenianMinutesPhrase(minutes) + ".";
+            string text = BuildAnnouncementText(VoiceTemplate, minutes);
+            SpeakCustomText(text, VoiceGain);
+        }
+
+        public static void SpeakCustomText(string text, double gainMultiplier)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return;
+            double gain = Math.Max(0.5, Math.Min(5.0, gainMultiplier));
 
             Thread t = new Thread(() =>
             {
@@ -465,7 +519,49 @@ namespace VzpenjacaKontrola
                             }
                             catch { }
                         }
-                        voiceType.InvokeMember("Speak", BindingFlags.InvokeMethod, null, voice, new object[] { text, 0 });
+
+                        try
+                        {
+                            voiceType.InvokeMember("Volume", BindingFlags.SetProperty, null, voice, new object[] { 100 });
+                        }
+                        catch { }
+
+                        bool playedAmplified = false;
+                        try
+                        {
+                            Type memStreamType = Type.GetTypeFromProgID("SAPI.SpMemoryStream");
+                            if (memStreamType != null)
+                            {
+                                object memStream = Activator.CreateInstance(memStreamType);
+                                object fmt = memStreamType.InvokeMember("Format", BindingFlags.GetProperty, null, memStream, null);
+                                if (fmt != null)
+                                {
+                                    // 22 = SAFT22kHz16BitMono
+                                    fmt.GetType().InvokeMember("Type", BindingFlags.SetProperty, null, fmt, new object[] { 22 });
+                                }
+                                voiceType.InvokeMember("AudioOutputStream", BindingFlags.SetProperty, null, voice, new object[] { memStream });
+                                voiceType.InvokeMember("Speak", BindingFlags.InvokeMethod, null, voice, new object[] { text, 0 });
+                                object rawObj = memStreamType.InvokeMember("GetData", BindingFlags.InvokeMethod, null, memStream, null);
+                                byte[] pcm = rawObj as byte[];
+                                if (pcm != null && pcm.Length > 0)
+                                {
+                                    byte[] wav = BuildAmplifiedSpeechWav(pcm, 22050, gain);
+                                    using (MemoryStream ms = new MemoryStream(wav, false))
+                                    using (SoundPlayer player = new SoundPlayer(ms))
+                                    {
+                                        player.PlaySync();
+                                    }
+                                    playedAmplified = true;
+                                }
+                            }
+                        }
+                        catch { }
+
+                        if (!playedAmplified)
+                        {
+                            voiceType.InvokeMember("AudioOutputStream", BindingFlags.SetProperty, null, voice, new object[] { null });
+                            voiceType.InvokeMember("Speak", BindingFlags.InvokeMethod, null, voice, new object[] { text, 0 });
+                        }
                     }
                 }
                 catch { }
@@ -473,6 +569,59 @@ namespace VzpenjacaKontrola
             t.IsBackground = true;
             t.SetApartmentState(ApartmentState.STA);
             t.Start();
+        }
+
+        private static byte[] BuildAmplifiedSpeechWav(byte[] pcmBytes, int sampleRate, double gainMultiplier)
+        {
+            int sampleCount = pcmBytes.Length / 2;
+            int peak = 1;
+            for (int i = 0; i < sampleCount; i++)
+            {
+                short s = BitConverter.ToInt16(pcmBytes, i * 2);
+                int abs = (s == short.MinValue) ? 32767 : Math.Abs((int)s);
+                if (abs > peak) peak = abs;
+            }
+
+            // Normalize to full scale (32000) and apply gain multiplier with soft-knee limiting
+            double normScale = (32000.0 / peak) * gainMultiplier;
+
+            int dataBytes = sampleCount * 2;
+            using (MemoryStream ms = new MemoryStream(44 + dataBytes))
+            using (BinaryWriter bw = new BinaryWriter(ms))
+            {
+                bw.Write(Encoding.ASCII.GetBytes("RIFF"));
+                bw.Write(36 + dataBytes);
+                bw.Write(Encoding.ASCII.GetBytes("WAVE"));
+                bw.Write(Encoding.ASCII.GetBytes("fmt "));
+                bw.Write(16);
+                bw.Write((short)1); // PCM
+                bw.Write((short)1); // Mono
+                bw.Write(sampleRate);
+                bw.Write(sampleRate * 2);
+                bw.Write((short)2);
+                bw.Write((short)16);
+                bw.Write(Encoding.ASCII.GetBytes("data"));
+                bw.Write(dataBytes);
+
+                for (int i = 0; i < sampleCount; i++)
+                {
+                    short s = BitConverter.ToInt16(pcmBytes, i * 2);
+                    double amplified = s * normScale;
+                    if (amplified > 26000.0)
+                    {
+                        amplified = 26000.0 + 6700.0 * Math.Tanh((amplified - 26000.0) / 6700.0);
+                    }
+                    else if (amplified < -26000.0)
+                    {
+                        amplified = -26000.0 - 6700.0 * Math.Tanh((-amplified - 26000.0) / 6700.0);
+                    }
+                    int outVal = (int)Math.Round(amplified);
+                    if (outVal > 32760) outVal = 32760;
+                    else if (outVal < -32760) outVal = -32760;
+                    bw.Write((short)outVal);
+                }
+                return ms.ToArray();
+            }
         }
 
         private static string FormatSlovenianMinutesPhrase(int minutes)
@@ -2447,6 +2596,209 @@ namespace VzpenjacaKontrola
         }
     }
 
+    public class VoiceSettingsDialog : Window
+    {
+        private readonly AppConfig _config;
+        private readonly CheckBox _chkEnabled;
+        private readonly TextBox _txtTemplate;
+        private readonly Slider _sliderGain;
+        private readonly TextBlock _lblGainValue;
+        private readonly TextBlock _lblPreview;
+
+        public VoiceSettingsDialog(Window owner, AppConfig config)
+        {
+            Owner = owner;
+            _config = config;
+
+            Title = "Glasovno obvestilo ob odhodu — Vzpenjača";
+            Width = 480;
+            Height = 395;
+            ResizeMode = ResizeMode.NoResize;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            Background = ThemePalette.WindowBg;
+            Foreground = ThemePalette.TextPrimary;
+
+            StackPanel root = new StackPanel { Margin = new Thickness(18, 16, 18, 16) };
+
+            TextBlock title = new TextBlock
+            {
+                Text = "Glasovno obvestilo ob odhodu",
+                FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
+                FontSize = 15,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = ThemePalette.TextPrimary,
+                Margin = new Thickness(0, 0, 0, 12)
+            };
+            root.Children.Add(title);
+
+            _chkEnabled = new CheckBox
+            {
+                Content = "Omogoči glasovno obvestilo ob odhodu vzpenjače",
+                IsChecked = _config.VoiceAnnouncementEnabled,
+                Foreground = ThemePalette.TextPrimary,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 12.5,
+                Margin = new Thickness(0, 0, 0, 14)
+            };
+            root.Children.Add(_chkEnabled);
+
+            Grid gainHeader = new Grid { Margin = new Thickness(0, 0, 0, 4) };
+            gainHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            gainHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            TextBlock lblGainTitle = CreateLabel("Glasnost obvestila (ojačanje):");
+            lblGainTitle.Margin = new Thickness(0);
+            Grid.SetColumn(lblGainTitle, 0);
+            gainHeader.Children.Add(lblGainTitle);
+
+            _lblGainValue = new TextBlock
+            {
+                Text = Math.Round(_config.VoiceAnnouncementGain * 100.0).ToString("0", CultureInfo.InvariantCulture) + " %",
+                Foreground = ThemePalette.AccentEmerald,
+                FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
+                FontSize = 12
+            };
+            Grid.SetColumn(_lblGainValue, 1);
+            gainHeader.Children.Add(_lblGainValue);
+            root.Children.Add(gainHeader);
+
+            _sliderGain = new Slider
+            {
+                Minimum = 1.0,
+                Maximum = 4.0,
+                Value = Math.Max(1.0, Math.Min(4.0, _config.VoiceAnnouncementGain)),
+                TickFrequency = 0.25,
+                IsSnapToTickEnabled = true,
+                Margin = new Thickness(0, 0, 0, 14),
+                Cursor = Cursors.Hand
+            };
+            _sliderGain.ValueChanged += (s, e) =>
+            {
+                if (_lblGainValue != null)
+                {
+                    _lblGainValue.Text = Math.Round(_sliderGain.Value * 100.0).ToString("0", CultureInfo.InvariantCulture) + " %";
+                }
+            };
+            root.Children.Add(_sliderGain);
+
+            root.Children.Add(CreateLabel("Besedilo obvestila (uporabite {minute} za interval naslednje vožnje):"));
+
+            _txtTemplate = new TextBox
+            {
+                Text = string.IsNullOrWhiteSpace(_config.VoiceAnnouncementTemplate)
+                    ? AppConfig.DefaultVoiceTemplate
+                    : _config.VoiceAnnouncementTemplate,
+                Background = ThemePalette.CardBg,
+                Foreground = ThemePalette.TextPrimary,
+                BorderBrush = ThemePalette.BtnBorder,
+                CaretBrush = ThemePalette.TextPrimary,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 13,
+                Padding = new Thickness(8, 6, 8, 6),
+                TextWrapping = TextWrapping.Wrap,
+                AcceptsReturn = false,
+                Height = 56,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Margin = new Thickness(0, 0, 0, 6)
+            };
+            root.Children.Add(_txtTemplate);
+
+            _lblPreview = new TextBlock
+            {
+                Text = "Primer izgovora: \"" + ChimePlayer.BuildAnnouncementText(_txtTemplate.Text, 10) + "\"",
+                Foreground = ThemePalette.TextMuted,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 11.2,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 14)
+            };
+            _txtTemplate.TextChanged += (s, e) =>
+            {
+                if (_lblPreview != null)
+                {
+                    _lblPreview.Text = "Primer izgovora: \"" + ChimePlayer.BuildAnnouncementText(_txtTemplate.Text, 10) + "\"";
+                }
+            };
+            root.Children.Add(_lblPreview);
+
+            Grid btnRow = new Grid { Margin = new Thickness(0, 6, 0, 0) };
+            btnRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            btnRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            btnRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            btnRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            Button btnDefault = CreateDialogButton("Privzeto besedilo", false);
+            btnDefault.Click += (s, e) =>
+            {
+                _txtTemplate.Text = AppConfig.DefaultVoiceTemplate;
+            };
+            Grid.SetColumn(btnDefault, 0);
+            btnRow.Children.Add(btnDefault);
+
+            Button btnTest = CreateDialogButton("Preizkusi glas", false);
+            btnTest.Margin = new Thickness(0, 0, 8, 0);
+            btnTest.Click += (s, e) =>
+            {
+                string sampleText = ChimePlayer.BuildAnnouncementText(_txtTemplate.Text, 10);
+                ChimePlayer.SpeakCustomText(sampleText, _sliderGain.Value);
+            };
+            Grid.SetColumn(btnTest, 2);
+            btnRow.Children.Add(btnTest);
+
+            Button btnSave = CreateDialogButton("Shrani", true);
+            btnSave.Click += (s, e) =>
+            {
+                _config.VoiceAnnouncementEnabled = _chkEnabled.IsChecked == true;
+                string tpl = (_txtTemplate.Text ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+                _config.VoiceAnnouncementTemplate = string.IsNullOrEmpty(tpl)
+                    ? AppConfig.DefaultVoiceTemplate
+                    : tpl;
+                _config.VoiceAnnouncementGain = Math.Round(_sliderGain.Value, 2);
+                _config.Save();
+
+                ChimePlayer.VoiceEnabled = _config.VoiceAnnouncementEnabled;
+                ChimePlayer.VoiceTemplate = _config.VoiceAnnouncementTemplate;
+                ChimePlayer.VoiceGain = _config.VoiceAnnouncementGain;
+
+                DialogResult = true;
+                Close();
+            };
+            Grid.SetColumn(btnSave, 3);
+            btnRow.Children.Add(btnSave);
+
+            root.Children.Add(btnRow);
+
+            Content = root;
+        }
+
+        private static TextBlock CreateLabel(string text)
+        {
+            return new TextBlock
+            {
+                Text = text,
+                Foreground = ThemePalette.TextSecondary,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 11.5,
+                Margin = new Thickness(0, 0, 0, 4)
+            };
+        }
+
+        private static Button CreateDialogButton(string text, bool primary)
+        {
+            return new Button
+            {
+                Content = text,
+                Padding = new Thickness(12, 6, 12, 6),
+                Background = primary ? ThemePalette.AccentBlueActiveBg : ThemePalette.BtnBg,
+                Foreground = ThemePalette.TextPrimary,
+                BorderBrush = primary ? ThemePalette.AccentBlue : ThemePalette.BtnBorder,
+                FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
+                FontSize = 12.5,
+                Cursor = Cursors.Hand
+            };
+        }
+    }
+
     public class MainWindow : Window
     {
         private const int WM_SYSCOMMAND = 0x0112;
@@ -2499,6 +2851,8 @@ namespace VzpenjacaKontrola
             AppConfig.ApplyAutostart(_config.StartWithWindows);
             ChimePlayer.Enabled = _config.SoundEnabled;
             ChimePlayer.VoiceEnabled = _config.VoiceAnnouncementEnabled;
+            ChimePlayer.VoiceTemplate = _config.VoiceAnnouncementTemplate;
+            ChimePlayer.VoiceGain = _config.VoiceAnnouncementGain;
 
             Title = "Vzpenjača";
             Width = _config.WindowWidth;
@@ -2757,7 +3111,7 @@ namespace VzpenjacaKontrola
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | topFlag, (UIntPtr)IDM_ALWAYS_ON_TOP, "Vedno na vrhu");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | autostartFlag, (UIntPtr)IDM_START_WITH_WINDOWS, "Zaženi ob zagonu računalnika");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | soundFlag, (UIntPtr)IDM_SOUND_ENABLED, "Zvočna opozorila");
-                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | voiceFlag, (UIntPtr)IDM_VOICE_ENABLED, "Glasovno obvestilo ob odhodu");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | voiceFlag, (UIntPtr)IDM_VOICE_ENABLED, "Glasovno obvestilo ob odhodu...");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | cloudFlag, (UIntPtr)IDM_CLOUD_SETTINGS, "Mobilni dostop (Oblak)...");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_TOGGLE_CONTROLS, "Preklopi kontrole okna\t(F11)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
@@ -2817,14 +3171,9 @@ namespace VzpenjacaKontrola
                 }
                 else if (cmd == IDM_VOICE_ENABLED)
                 {
-                    _config.VoiceAnnouncementEnabled = !_config.VoiceAnnouncementEnabled;
-                    ChimePlayer.VoiceEnabled = _config.VoiceAnnouncementEnabled;
-                    _config.Save();
-
-                    if (_hSysMenu != IntPtr.Zero)
-                    {
-                        CheckMenuItem(_hSysMenu, IDM_VOICE_ENABLED, MF_BYCOMMAND | (_config.VoiceAnnouncementEnabled ? MF_CHECKED : MF_UNCHECKED));
-                    }
+                    VoiceSettingsDialog dlg = new VoiceSettingsDialog(this, _config);
+                    dlg.ShowDialog();
+                    RefreshSystemMenu();
                     handled = true;
                 }
                 else if (cmd == IDM_CLOUD_SETTINGS)
