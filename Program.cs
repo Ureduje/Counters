@@ -25,8 +25,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Nadzorna plošča vzpenjače — Zgornja in spodnja postaja")]
 [assembly: AssemblyCompany("Vzpenjača")]
 [assembly: AssemblyProduct("Vzpenjača")]
-[assembly: AssemblyVersion("1.1.1.0")]
-[assembly: AssemblyFileVersion("1.1.1.0")]
+[assembly: AssemblyVersion("1.1.2.0")]
+[assembly: AssemblyFileVersion("1.1.2.0")]
 
 namespace VzpenjacaKontrola
 {
@@ -63,7 +63,7 @@ namespace VzpenjacaKontrola
         public bool ShowIntervalBgZgoraj = true;
         public bool ShowIntervalBgSpodaj = true;
         public bool CloudRelayEnabled = true;
-        public string CloudRelayServer = "https://ntfy.sh";
+        public string CloudRelayServer = "https://ntfy.adminforge.de";
         public string CloudChannelId = "vzpenjaca-3436";
         public string CloudPin = "";
 
@@ -173,7 +173,13 @@ namespace VzpenjacaKontrola
                         }
                         else if (key.Equals("CloudRelayServer", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(val))
                         {
-                            cfg.CloudRelayServer = val.TrimEnd('/');
+                            string srv = val.TrimEnd('/');
+                            if (srv.Equals("https://ntfy.sh", StringComparison.OrdinalIgnoreCase) ||
+                                srv.Equals("http://ntfy.sh", StringComparison.OrdinalIgnoreCase))
+                            {
+                                srv = "https://ntfy.adminforge.de";
+                            }
+                            cfg.CloudRelayServer = srv;
                         }
                         else if (key.Equals("CloudChannelId", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(val))
                         {
@@ -663,7 +669,7 @@ namespace VzpenjacaKontrola
         public static readonly SolidColorBrush AccentBtnMuted = BrushFromHex("#3E5274");
         public static readonly SolidColorBrush AccentEmerald = BrushFromHex("#10B981");
         public static readonly SolidColorBrush AccentAmber = BrushFromHex("#F59E0B");
-        public static readonly SolidColorBrush AccentCoral = BrushFromHex("#F43F5E");
+        public static readonly SolidColorBrush AccentCoral = BrushFromHex("#EF4444");
         public static readonly SolidColorBrush AccentYellow = BrushFromHex("#FACC15");
         public static readonly SolidColorBrush AccentRed = BrushFromHex("#EF4444");
 
@@ -732,6 +738,7 @@ namespace VzpenjacaKontrola
                 FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
                 FontSize = fontSize,
                 FontWeight = FontWeights.SemiBold,
+                TextAlignment = TextAlignment.Center,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -1134,8 +1141,9 @@ namespace VzpenjacaKontrola
                 BorderBrush = ThemePalette.Divider,
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(8),
-                Padding = new Thickness(12, 6, 12, 8),
-                Margin = new Thickness(3, 0, 3, 5)
+                Padding = new Thickness(0),
+                Margin = new Thickness(3, 0, 3, 5),
+                ClipToBounds = true
             };
 
             Grid timeDisplayGrid = new Grid();
@@ -1143,22 +1151,23 @@ namespace VzpenjacaKontrola
             timeDisplayGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
             timeDisplayGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
-            // Background Interval Display (80% height, 80% transparency = Opacity 0.20)
+            // Background Interval Display (Always 80% width, 80% transparency = Opacity 0.20)
             _bgIntervalGrid = new Grid
             {
                 IsHitTestVisible = false,
                 Opacity = 0.20,
                 Visibility = _showIntervalBg ? Visibility.Visible : Visibility.Collapsed
             };
-            _bgIntervalGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(0.1, GridUnitType.Star) });
-            _bgIntervalGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(0.8, GridUnitType.Star) });
-            _bgIntervalGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(0.1, GridUnitType.Star) });
+            _bgIntervalGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(0.1, GridUnitType.Star) });
+            _bgIntervalGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(0.8, GridUnitType.Star) });
+            _bgIntervalGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(0.1, GridUnitType.Star) });
 
             Viewbox bgIntervalViewbox = new Viewbox
             {
                 Stretch = Stretch.Uniform,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, -500, 0, -500)
             };
             _txtBgIntervalValue = new TextBlock
             {
@@ -1171,12 +1180,15 @@ namespace VzpenjacaKontrola
             };
             Typography.SetNumeralAlignment(_txtBgIntervalValue, FontNumeralAlignment.Tabular);
             bgIntervalViewbox.Child = _txtBgIntervalValue;
-            Grid.SetRow(bgIntervalViewbox, 1);
+            Grid.SetColumn(bgIntervalViewbox, 1);
             _bgIntervalGrid.Children.Add(bgIntervalViewbox);
             Grid.SetRowSpan(_bgIntervalGrid, 3);
             timeDisplayGrid.Children.Add(_bgIntervalGrid);
 
-            Grid timeTopRow = new Grid();
+            Grid timeTopRow = new Grid
+            {
+                Margin = new Thickness(12, 6, 12, 0)
+            };
             TextBlock lblTimeHeader = new TextBlock
             {
                 Text = "ČAS DO ODHODA",
@@ -1219,7 +1231,7 @@ namespace VzpenjacaKontrola
                 Stretch = Stretch.Uniform,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 1, 0, 2)
+                Margin = new Thickness(12, 1, 12, 2)
             };
             _txtTimerValue = new TextBlock
             {
@@ -1239,7 +1251,8 @@ namespace VzpenjacaKontrola
                 Height = 4,
                 CornerRadius = new CornerRadius(2),
                 Background = ThemePalette.TrackBg,
-                HorizontalAlignment = HorizontalAlignment.Stretch
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Margin = new Thickness(12, 0, 12, 8)
             };
             _timerProgressFill = new Border
             {
@@ -1274,13 +1287,13 @@ namespace VzpenjacaKontrola
                 ToolTip = "Nastavi interval na 10 minut (10:00)"
             };
 
-            AddButtonToGrid(timeButtonsGrid, btnInterval10, 0, 0);
-            AddButtonToGrid(timeButtonsGrid, new ModernActionButton(2, "+ 1 min", ThemePalette.AccentEmerald), 0, 1);
-            AddButtonToGrid(timeButtonsGrid, new ModernActionButton(3, "+ 5 min", ThemePalette.AccentEmerald), 0, 2);
+            AddButtonToGrid(timeButtonsGrid, new ModernActionButton(2, "+ 1 min", ThemePalette.AccentEmerald), 0, 0);
+            AddButtonToGrid(timeButtonsGrid, new ModernActionButton(3, "+ 5 min", ThemePalette.AccentEmerald), 0, 1);
+            AddButtonToGrid(timeButtonsGrid, btnInterval10, 0, 2);
 
-            AddButtonToGrid(timeButtonsGrid, btnInterval6, 1, 0);
-            AddButtonToGrid(timeButtonsGrid, new ModernActionButton(5, "− 1 min", ThemePalette.AccentCoral), 1, 1);
-            AddButtonToGrid(timeButtonsGrid, new ModernActionButton(6, "− 5 min", ThemePalette.AccentCoral), 1, 2);
+            AddButtonToGrid(timeButtonsGrid, new ModernActionButton(5, "− 1 min", ThemePalette.AccentRed), 1, 0);
+            AddButtonToGrid(timeButtonsGrid, new ModernActionButton(6, "− 5 min", ThemePalette.AccentRed), 1, 1);
+            AddButtonToGrid(timeButtonsGrid, btnInterval6, 1, 2);
 
             Grid.SetRow(timeButtonsGrid, 1);
             _timeSection.Children.Add(timeDisplayBox);
@@ -1395,15 +1408,15 @@ namespace VzpenjacaKontrola
             personsButtonsGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             personsButtonsGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-            AddButtonToGrid(personsButtonsGrid, new ModernActionButton(8, "− 1 oseba", ThemePalette.AccentCoral, 14.5), 0, 0);
-            AddButtonToGrid(personsButtonsGrid, new ModernActionButton(7, "+ 1 oseba", ThemePalette.AccentEmerald, 14.5), 0, 1);
+            AddButtonToGrid(personsButtonsGrid, new ModernActionButton(7, "+ 1 oseba", ThemePalette.AccentEmerald, 14.5), 0, 0);
+            AddButtonToGrid(personsButtonsGrid, new ModernActionButton(8, "− 1 oseba", ThemePalette.AccentRed, 14.5), 1, 0);
 
-            ModernActionButton btnReset = new ModernActionButton(9, "Ponastavi števec", ThemePalette.AccentBtnMuted, 14.0);
+            ModernActionButton btnReset = new ModernActionButton(9, "Ponastavi\nštevec", ThemePalette.AccentBtnMuted, 14.0);
             btnReset.ToolTip = "Ponastavi število oseb na maksimalno kapaciteto (28)";
             btnReset.Clicked += async (btn) => await ExecuteCommandAsync(btn.CommandId);
-            Grid.SetRow(btnReset, 1);
-            Grid.SetColumn(btnReset, 0);
-            Grid.SetColumnSpan(btnReset, 2);
+            Grid.SetRow(btnReset, 0);
+            Grid.SetRowSpan(btnReset, 2);
+            Grid.SetColumn(btnReset, 1);
             personsButtonsGrid.Children.Add(btnReset);
 
             Grid.SetRow(personsButtonsGrid, 1);
@@ -1838,8 +1851,9 @@ namespace VzpenjacaKontrola
         private readonly SemaphoreSlim _publishLock = new SemaphoreSlim(1, 1);
         private CancellationTokenSource _cts;
         private DateTime _lastPublishUtc = DateTime.MinValue;
-        private DateTime _lastMobileActiveUtc = DateTime.UtcNow;
+        private DateTime _lastMobileActiveUtc = DateTime.MinValue;
         private string _lastStateSignature = "";
+        private int _trailingPublishScheduled = 0;
         private readonly System.Collections.Generic.HashSet<string> _processedIds = new System.Collections.Generic.HashSet<string>();
 
         public bool IsConnected { get; private set; }
@@ -1927,7 +1941,6 @@ namespace VzpenjacaKontrola
         public void Restart()
         {
             _lastStateSignature = "";
-            _lastMobileActiveUtc = DateTime.UtcNow;
             Start();
         }
 
@@ -1945,15 +1958,42 @@ namespace VzpenjacaKontrola
             if (!_config.CloudRelayEnabled) return;
 
             DateTime now = DateTime.UtcNow;
-            bool mobileRecentlyActive = (now - _lastMobileActiveUtc).TotalMinutes < 10.0;
+            // Mobile app sends a "sync" heartbeat on open and every 90s while active.
+            // Do not publish continuous turnstile updates when no mobile client is active.
+            bool mobileRecentlyActive = (now - _lastMobileActiveUtc).TotalSeconds < 135.0;
+            if (!mobileRecentlyActive) return;
+
             string sig = BuildStateSignature();
             bool sigChanged = (sig != _lastStateSignature);
 
             if (significantChange || sigChanged)
             {
-                Task.Run(() => PublishStateAsync(false));
+                double elapsedMs = (now - _lastPublishUtc).TotalMilliseconds;
+                if (elapsedMs >= 3500.0)
+                {
+                    Task.Run(() => PublishStateAsync(false));
+                }
+                else if (Interlocked.CompareExchange(ref _trailingPublishScheduled, 1, 0) == 0)
+                {
+                    int delayMs = Math.Max(400, (int)(3500.0 - elapsedMs) + 100);
+                    Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await Task.Delay(delayMs).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            Interlocked.Exchange(ref _trailingPublishScheduled, 0);
+                        }
+                        if ((DateTime.UtcNow - _lastMobileActiveUtc).TotalSeconds < 135.0)
+                        {
+                            await PublishStateAsync(false).ConfigureAwait(false);
+                        }
+                    });
+                }
             }
-            else if (mobileRecentlyActive && (now - _lastPublishUtc).TotalSeconds >= 18.0)
+            else if ((now - _lastPublishUtc).TotalSeconds >= 45.0)
             {
                 Task.Run(() => PublishStateAsync(false));
             }
@@ -1979,7 +2019,7 @@ namespace VzpenjacaKontrola
             if (!_config.CloudRelayEnabled) return false;
 
             DateTime now = DateTime.UtcNow;
-            if (!force && (now - _lastPublishUtc).TotalMilliseconds < 900)
+            if (!force && (now - _lastPublishUtc).TotalMilliseconds < 3200)
                 return false;
 
             int lockTimeoutMs = force ? 5000 : 0;
@@ -2007,7 +2047,7 @@ namespace VzpenjacaKontrola
                     _cardSpodaj.RemainingMs,
                     _cardSpodaj.SetMs);
 
-                string server = string.IsNullOrEmpty(_config.CloudRelayServer) ? "https://ntfy.sh" : _config.CloudRelayServer.TrimEnd('/');
+                string server = string.IsNullOrEmpty(_config.CloudRelayServer) ? "https://ntfy.adminforge.de" : _config.CloudRelayServer.TrimEnd('/');
                 string url = server + "/" + StateTopic;
 
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
@@ -2030,6 +2070,15 @@ namespace VzpenjacaKontrola
                     return true;
                 }
             }
+            catch (WebException wex)
+            {
+                HttpWebResponse httpResp = wex.Response as HttpWebResponse;
+                if (httpResp != null && (int)httpResp.StatusCode == 429)
+                {
+                    UpdateStatus("Omejitev strežnika (429) — zamenjajte strežnik");
+                }
+                return false;
+            }
             catch
             {
                 return false;
@@ -2049,7 +2098,7 @@ namespace VzpenjacaKontrola
                 bool failed = false;
                 try
                 {
-                    string server = string.IsNullOrEmpty(_config.CloudRelayServer) ? "https://ntfy.sh" : _config.CloudRelayServer.TrimEnd('/');
+                    string server = string.IsNullOrEmpty(_config.CloudRelayServer) ? "https://ntfy.adminforge.de" : _config.CloudRelayServer.TrimEnd('/');
                     string streamUrl = server + "/" + CommandTopic + (hasConnectedOnce ? "/json?since=15s" : "/json");
 
                     UpdateStatus("Povezovanje v oblak...");
@@ -2340,7 +2389,7 @@ namespace VzpenjacaKontrola
                 _config.CloudChannelId = CloudRelayBridge.SanitizeChannel(_txtChannel.Text);
                 _config.CloudPin = (_txtPin.Text ?? "").Trim();
                 string srv = (_txtServer.Text ?? "").Trim().TrimEnd('/');
-                _config.CloudRelayServer = string.IsNullOrEmpty(srv) ? "https://ntfy.sh" : srv;
+                _config.CloudRelayServer = string.IsNullOrEmpty(srv) ? "https://ntfy.adminforge.de" : srv;
                 _config.Save();
                 if (_bridge != null) _bridge.Restart();
                 DialogResult = true;
@@ -2716,7 +2765,7 @@ namespace VzpenjacaKontrola
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_OUT, "Pomanjšaj števce\t(Ctrl -)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_RESET, "Ponastavi velikost števcev\t(Ctrl 0)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
-                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.1.1");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.1.2");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
             }
         }
@@ -2808,7 +2857,7 @@ namespace VzpenjacaKontrola
                 else if (cmd == IDM_VERSION)
                 {
                     MessageBox.Show(
-                        "Nadzorna plošča vzpenjače\nRazličica 1.1.1\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj + "\nMobilni kanal: " + _config.CloudChannelId,
+                        "Nadzorna plošča vzpenjače\nRazličica 1.1.2\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj + "\nMobilni kanal: " + _config.CloudChannelId,
                         "O programu — Vzpenjača",
                         MessageBoxButton.OK,
                         MessageBoxImage.Information);

@@ -66,7 +66,7 @@ class MobileConfig(private val context: Context) {
     private val prefs = context.getSharedPreferences("vzpenjaca_prefs", Context.MODE_PRIVATE)
 
     var useCloudRelay: Boolean = true
-    var cloudServer: String = "https://ntfy.sh"
+    var cloudServer: String = "https://ntfy.adminforge.de"
     var cloudChannelId: String = "vzpenjaca-3436"
     var cloudPin: String = ""
     var ipZgoraj: String = "10.12.220.34"
@@ -86,7 +86,14 @@ class MobileConfig(private val context: Context) {
 
     fun load() {
         if (prefs.contains("useCloudRelay")) useCloudRelay = prefs.getBoolean("useCloudRelay", true)
-        prefs.getString("cloudServer", null)?.takeIf { it.isNotBlank() }?.let { cloudServer = it.trimEnd('/') }
+        prefs.getString("cloudServer", null)?.takeIf { it.isNotBlank() }?.let {
+            val srv = it.trimEnd('/')
+            cloudServer = if (srv.equals("https://ntfy.sh", ignoreCase = true) || srv.equals("http://ntfy.sh", ignoreCase = true)) {
+                "https://ntfy.adminforge.de"
+            } else {
+                srv
+            }
+        }
         prefs.getString("cloudChannelId", null)?.takeIf { it.isNotBlank() }?.let { cloudChannelId = sanitizeChannel(it) }
         prefs.getString("cloudPin", null)?.let { cloudPin = it }
         prefs.getString("ipZgoraj", null)?.takeIf { it.isNotBlank() }?.let { ipZgoraj = it.trim() }
@@ -152,7 +159,7 @@ object ThemeColors {
     val AccentBtnMuted = Color.parseColor("#3E5274")
     val AccentEmerald = Color.parseColor("#10B981")
     val AccentAmber = Color.parseColor("#F59E0B")
-    val AccentCoral = Color.parseColor("#F43F5E")
+    val AccentCoral = Color.parseColor("#EF4444")
     val AccentRed = Color.parseColor("#EF4444")
 
     val BtnBg = Color.parseColor("#1C2638")
@@ -396,6 +403,8 @@ class MainActivity : Activity() {
     private var activeStreamConnection: HttpURLConnection? = null
     @Volatile
     private var lastCloudSyncSendMs: Long = 0L
+    @Volatile
+    private var lastAppliedStateTs: Long = 0L
 
     private val tickRunnable = object : Runnable {
         override fun run() {
@@ -578,8 +587,8 @@ class MainActivity : Activity() {
         val btnSync = createHeaderButton("Osveži") {
             if (config.useCloudRelay) {
                 updateTopStatus("Osveževanje iz oblaka...", ThemeColors.AccentBlue)
-                fetchLatestCachedCloudState()
                 requestCloudSync()
+                uiHandler.postDelayed({ fetchLatestCachedCloudState() }, 900L)
             } else {
                 updateTopStatus("Osveževanje prek LAN...", ThemeColors.AccentBlue)
                 pollDirectLanBothStations(true)
@@ -653,12 +662,13 @@ class MainActivity : Activity() {
     private fun restartNetworking() {
         uiHandler.removeCallbacks(lanPollRunnable)
         stopCloudStream()
+        lastAppliedStateTs = 0L
 
         if (config.useCloudRelay) {
             updateTopStatus("Oblak (${config.cloudChannelId}): povezovanje...", ThemeColors.AccentAmber)
-            fetchLatestCachedCloudState()
             startCloudStream()
             requestCloudSync()
+            uiHandler.postDelayed({ fetchLatestCachedCloudState() }, 700L)
         } else {
             updateTopStatus("Lokalni Wi-Fi / VPN (${config.ipZgoraj}, ${config.ipSpodaj})", ThemeColors.AccentEmerald)
             uiHandler.post(lanPollRunnable)
@@ -754,7 +764,7 @@ class MainActivity : Activity() {
                         }
                     }
                     if (latestMessageJson != null) {
-                        applyCloudStatePayload(latestMessageJson)
+                        applyCloudStatePayload(latestMessageJson, fromCache = true)
                     }
                 }
             } catch (_: Throwable) {
@@ -792,7 +802,7 @@ class MainActivity : Activity() {
                             if (obj.optString("event") == "message") {
                                 val msg = obj.optString("message", "")
                                 if (msg.isNotEmpty()) {
-                                    applyCloudStatePayload(msg)
+                                    applyCloudStatePayload(msg, fromCache = false)
                                 }
                             }
                         }
@@ -860,21 +870,38 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun applyCloudStatePayload(jsonStr: String) {
+    private fun applyCloudStatePayload(jsonStr: String, fromCache: Boolean = false) {
         try {
             val obj = JSONObject(jsonStr)
+            val msgTs = obj.optLong("ts", 0L)
+            if (fromCache && msgTs > 0L && msgTs <= lastAppliedStateTs) {
+                return
+            }
+            val ageMs = if (fromCache && msgTs > 0L) {
+                (System.currentTimeMillis() - msgTs).coerceAtLeast(0L)
+            } else {
+                0L
+            }
+            // Ignore cached messages older than 15 minutes so stale history never overwrites the UI
+            if (fromCache && ageMs > 15 * 60 * 1000L) {
+                return
+            }
+            if (msgTs > lastAppliedStateTs) {
+                lastAppliedStateTs = msgTs
+            }
+
             val zState = StationState(
                 isOnline = obj.optInt("zOn", 0) == 1,
                 currentPersons = obj.optInt("zCur", 0),
                 maxPersons = obj.optInt("zMax", 28),
-                remainingTimeMs = max(0L, obj.optLong("zRem", 0L)),
+                remainingTimeMs = max(0L, obj.optLong("zRem", 0L) - ageMs),
                 setTimeMs = max(0L, obj.optLong("zSet", 0L))
             )
             val sState = StationState(
                 isOnline = obj.optInt("sOn", 0) == 1,
                 currentPersons = obj.optInt("sCur", 0),
                 maxPersons = obj.optInt("sMax", 28),
-                remainingTimeMs = max(0L, obj.optLong("sRem", 0L)),
+                remainingTimeMs = max(0L, obj.optLong("sRem", 0L) - ageMs),
                 setTimeMs = max(0L, obj.optLong("sSet", 0L))
             )
 
@@ -969,7 +996,7 @@ class MainActivity : Activity() {
                 config.cloudChannelId = MobileConfig.sanitizeChannel(edtChannel.text.toString())
                 config.cloudPin = edtPin.text.toString().trim()
                 val srv = edtServer.text.toString().trim().trimEnd('/')
-                config.cloudServer = if (srv.isNotEmpty()) srv else "https://ntfy.sh"
+                config.cloudServer = if (srv.isNotEmpty()) srv else "https://ntfy.adminforge.de"
                 config.ipZgoraj = edtIpZgoraj.text.toString().trim().ifEmpty { "10.12.220.34" }
                 config.ipSpodaj = edtIpSpodaj.text.toString().trim().ifEmpty { "10.12.220.36" }
                 config.soundEnabled = chkSound.isChecked
@@ -1306,13 +1333,14 @@ class StationCardView(
             }
         }
 
-        // Background Interval Watermark (Opacity 0.20, matching _bgIntervalGrid in PC version)
+        // Background Interval Watermark (80% width, Opacity 0.20, matching _bgIntervalGrid in PC version)
         txtBgIntervalValue = TextView(context).apply {
             text = "--:--"
             setTextColor(ThemeColors.TextSecondary)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 52f)
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             gravity = Gravity.CENTER
+            includeFontPadding = false
             alpha = 0.20f
             visibility = if (showIntervalBg) View.VISIBLE else View.GONE
             layoutParams = FrameLayout.LayoutParams(
@@ -1320,6 +1348,18 @@ class StationCardView(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 Gravity.CENTER
             )
+        }
+        timeDisplayBox.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+            val boxW = v.width
+            if (boxW > 0) {
+                val targetW = boxW * 0.80f
+                val sample = "00:00"
+                txtBgIntervalValue.paint.textSize = 100f
+                val measured = txtBgIntervalValue.paint.measureText(sample)
+                if (measured > 0f) {
+                    txtBgIntervalValue.setTextSize(TypedValue.COMPLEX_UNIT_PX, 100f * (targetW / measured))
+                }
+            }
         }
         timeDisplayBox.addView(txtBgIntervalValue)
 
@@ -1391,15 +1431,15 @@ class StationCardView(
 
         // Time Operator Buttons (2 rows x 3 columns)
         val timeBtnRow1 = LinearLayout(context).apply { orientation = HORIZONTAL }
-        timeBtnRow1.addView(createActionButton(11, "10 min", ThemeColors.AccentBtnMuted))
         timeBtnRow1.addView(createActionButton(2, "+ 1 min", ThemeColors.AccentEmerald))
         timeBtnRow1.addView(createActionButton(3, "+ 5 min", ThemeColors.AccentEmerald))
+        timeBtnRow1.addView(createActionButton(11, "10 min", ThemeColors.AccentBtnMuted))
         contentContainer.addView(timeBtnRow1)
 
         val timeBtnRow2 = LinearLayout(context).apply { orientation = HORIZONTAL }
+        timeBtnRow2.addView(createActionButton(5, "− 1 min", ThemeColors.AccentRed))
+        timeBtnRow2.addView(createActionButton(6, "− 5 min", ThemeColors.AccentRed))
         timeBtnRow2.addView(createActionButton(10, "6 min", ThemeColors.AccentBtnMuted))
-        timeBtnRow2.addView(createActionButton(5, "− 1 min", ThemeColors.AccentCoral))
-        timeBtnRow2.addView(createActionButton(6, "− 5 min", ThemeColors.AccentCoral))
         contentContainer.addView(timeBtnRow2)
 
         // Divider between Time and Persons
@@ -1475,15 +1515,33 @@ class StationCardView(
         personsDisplayBox.addView(personsProgressTrack)
         contentContainer.addView(personsDisplayBox)
 
-        // Persons Operator Buttons
-        val personsBtnRow1 = LinearLayout(context).apply { orientation = HORIZONTAL }
-        personsBtnRow1.addView(createActionButton(8, "− 1 oseba", ThemeColors.AccentCoral))
-        personsBtnRow1.addView(createActionButton(7, "+ 1 oseba", ThemeColors.AccentEmerald))
-        contentContainer.addView(personsBtnRow1)
+        // Persons Operator Buttons: Left column (+1 oseba / -1 oseba), Right column spanning rows 1..2 (Ponastavi števec)
+        val personsButtonsRow = LinearLayout(context).apply { orientation = HORIZONTAL }
+        val personsLeftCol = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val btnPlusPerson = createActionButton(7, "+ 1 oseba", ThemeColors.AccentEmerald).apply {
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply {
+                setMargins(dp(3), dp(3), dp(3), dp(3))
+            }
+        }
+        val btnMinusPerson = createActionButton(8, "− 1 oseba", ThemeColors.AccentRed).apply {
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply {
+                setMargins(dp(3), dp(3), dp(3), dp(3))
+            }
+        }
+        personsLeftCol.addView(btnPlusPerson)
+        personsLeftCol.addView(btnMinusPerson)
 
-        val personsBtnRow2 = LinearLayout(context).apply { orientation = HORIZONTAL }
-        personsBtnRow2.addView(createActionButton(9, "Ponastavi števec", ThemeColors.AccentBtnMuted))
-        contentContainer.addView(personsBtnRow2)
+        val btnResetCounter = createActionButton(9, "Ponastavi\nštevec", ThemeColors.AccentBtnMuted).apply {
+            layoutParams = LayoutParams(0, dp(94), 1f).apply {
+                setMargins(dp(3), dp(3), dp(3), dp(3))
+            }
+        }
+        personsButtonsRow.addView(personsLeftCol)
+        personsButtonsRow.addView(btnResetCounter)
+        contentContainer.addView(personsButtonsRow)
 
         addView(contentContainer)
         applyDimVisuals()
