@@ -25,8 +25,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Nadzorna plošča vzpenjače — Zgornja in spodnja postaja")]
 [assembly: AssemblyCompany("Vzpenjača")]
 [assembly: AssemblyProduct("Vzpenjača")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
 
 namespace VzpenjacaKontrola
 {
@@ -936,6 +936,7 @@ namespace VzpenjacaKontrola
         private bool _isOnline = false;
         private bool _isPolling = false;
         private bool _isCommandBusy = false;
+        private readonly SemaphoreSlim _commandLock = new SemaphoreSlim(1, 1);
         private double _currentScale = 1.0;
         private bool _isNarrowLayout = false;
         private bool _hasInitialTelemetry = false;
@@ -1000,7 +1001,7 @@ namespace VzpenjacaKontrola
             {
                 try
                 {
-                    await ExecuteCommandAsync(commandId);
+                    await ExecuteCommandAsync(commandId, true);
                     tcs.TrySetResult(true);
                 }
                 catch (Exception ex)
@@ -1531,9 +1532,9 @@ namespace VzpenjacaKontrola
             grid.Children.Add(btn);
         }
 
-        private async Task ExecuteCommandAsync(int commandId)
+        private async Task ExecuteCommandAsync(int commandId, bool isRemoteCommand = false)
         {
-            if (_isCommandBusy) return;
+            await _commandLock.WaitAsync();
             _isCommandBusy = true;
             try
             {
@@ -1551,7 +1552,7 @@ namespace VzpenjacaKontrola
                         try
                         {
                             t = await Client.SendOperatorCommandAsync(adjCmd, 1500);
-                            ApplyTelemetry(t, false);
+                            ApplyTelemetry(t, false, true);
                         }
                         catch
                         {
@@ -1562,7 +1563,7 @@ namespace VzpenjacaKontrola
                             await Task.Delay(120);
                         }
                     }
-                    ApplyTelemetry(t, true);
+                    ApplyTelemetry(t, true, isRemoteCommand);
                 }
                 else if (commandId == 10 || commandId == 11)
                 {
@@ -1586,7 +1587,7 @@ namespace VzpenjacaKontrola
                         try
                         {
                             t = await Client.SendOperatorCommandAsync(adjCmd, 1500);
-                            ApplyTelemetry(t, true);
+                            ApplyTelemetry(t, true, true);
                         }
                         catch
                         {
@@ -1597,12 +1598,12 @@ namespace VzpenjacaKontrola
                             await Task.Delay(120);
                         }
                     }
-                    ApplyTelemetry(t, true);
+                    ApplyTelemetry(t, true, isRemoteCommand);
                 }
                 else
                 {
                     StationTelemetry t = await Client.SendOperatorCommandAsync(commandId, 1800);
-                    ApplyTelemetry(t, true);
+                    ApplyTelemetry(t, true, isRemoteCommand);
                 }
             }
             catch
@@ -1612,6 +1613,7 @@ namespace VzpenjacaKontrola
             finally
             {
                 _isCommandBusy = false;
+                _commandLock.Release();
             }
         }
 
@@ -1622,7 +1624,7 @@ namespace VzpenjacaKontrola
             try
             {
                 StationTelemetry t = await Client.SendOperatorCommandAsync(0, 1800);
-                ApplyTelemetry(t, forceSyncTime);
+                ApplyTelemetry(t, forceSyncTime, false);
             }
             catch
             {
@@ -1634,7 +1636,7 @@ namespace VzpenjacaKontrola
             }
         }
 
-        private void ApplyTelemetry(StationTelemetry t, bool forceSyncTime)
+        private void ApplyTelemetry(StationTelemetry t, bool forceSyncTime, bool suppressCloudPublish = false)
         {
             bool isFirstLoad = !_hasInitialTelemetry;
             bool wasOffline = !_isOnline;
@@ -1678,11 +1680,14 @@ namespace VzpenjacaKontrola
             RenderPersons(isFirstLoad);
             _hasInitialTelemetry = true;
 
-            bool significantChange = isFirstLoad || wasOffline || forceSyncTime || timeJump ||
-                                     prevPersons != _currentPersons || prevMax != _maxPersons || prevSetMs != _setMs;
-            if (TelemetryUpdated != null)
+            if (!suppressCloudPublish)
             {
-                TelemetryUpdated(significantChange);
+                bool significantChange = isFirstLoad || wasOffline || forceSyncTime || timeJump ||
+                                         prevPersons != _currentPersons || prevMax != _maxPersons || prevSetMs != _setMs;
+                if (TelemetryUpdated != null)
+                {
+                    TelemetryUpdated(significantChange);
+                }
             }
         }
 
@@ -1944,7 +1949,7 @@ namespace VzpenjacaKontrola
             string sig = BuildStateSignature();
             bool sigChanged = (sig != _lastStateSignature);
 
-            if (significantChange && sigChanged)
+            if (significantChange || sigChanged)
             {
                 Task.Run(() => PublishStateAsync(false));
             }
@@ -1977,7 +1982,8 @@ namespace VzpenjacaKontrola
             if (!force && (now - _lastPublishUtc).TotalMilliseconds < 900)
                 return false;
 
-            if (!await _publishLock.WaitAsync(0).ConfigureAwait(false))
+            int lockTimeoutMs = force ? 5000 : 0;
+            if (!await _publishLock.WaitAsync(lockTimeoutMs).ConfigureAwait(false))
                 return false;
 
             try
@@ -2036,6 +2042,7 @@ namespace VzpenjacaKontrola
 
         private async Task ListenCommandsLoopAsync(CancellationToken token)
         {
+            bool hasConnectedOnce = false;
             while (!token.IsCancellationRequested)
             {
                 HttpWebRequest req = null;
@@ -2043,7 +2050,7 @@ namespace VzpenjacaKontrola
                 try
                 {
                     string server = string.IsNullOrEmpty(_config.CloudRelayServer) ? "https://ntfy.sh" : _config.CloudRelayServer.TrimEnd('/');
-                    string streamUrl = server + "/" + CommandTopic + "/json";
+                    string streamUrl = server + "/" + CommandTopic + (hasConnectedOnce ? "/json?since=15s" : "/json");
 
                     UpdateStatus("Povezovanje v oblak...");
                     req = (HttpWebRequest)WebRequest.Create(streamUrl);
@@ -2058,12 +2065,21 @@ namespace VzpenjacaKontrola
                     using (Stream stream = resp.GetResponseStream())
                     using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
                     {
+                        hasConnectedOnce = true;
                         IsConnected = true;
                         UpdateStatus("Povezano (" + SanitizeChannel(_config.CloudChannelId) + ")");
 
                         while (!token.IsCancellationRequested)
                         {
-                            string line = await reader.ReadLineAsync().ConfigureAwait(false);
+                            Task<string> readTask = reader.ReadLineAsync();
+                            Task completed = await Task.WhenAny(readTask, Task.Delay(75000, token)).ConfigureAwait(false);
+                            if (completed != readTask)
+                            {
+                                try { req.Abort(); } catch { }
+                                break;
+                            }
+
+                            string line = await readTask.ConfigureAwait(false);
                             if (line == null) break;
                             string trimmed = line.Trim();
                             if (trimmed.Length == 0) continue;
@@ -2080,7 +2096,7 @@ namespace VzpenjacaKontrola
                 if (failed && !token.IsCancellationRequested)
                 {
                     UpdateStatus("Ponovno povezovanje...");
-                    await Task.Delay(3000).ConfigureAwait(false);
+                    await Task.Delay(2500).ConfigureAwait(false);
                 }
             }
         }
@@ -2146,13 +2162,35 @@ namespace VzpenjacaKontrola
             catch { }
         }
 
+        private static int FindJsonKeyColon(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return -1;
+            string pattern = "\"" + key + "\"";
+            int searchFrom = 0;
+            while (searchFrom < json.Length)
+            {
+                int idx = json.IndexOf(pattern, searchFrom, StringComparison.OrdinalIgnoreCase);
+                if (idx < 0) return -1;
+
+                int p = idx - 1;
+                while (p >= 0 && (json[p] == ' ' || json[p] == '\t' || json[p] == '\r' || json[p] == '\n')) p--;
+                bool validPrev = (p >= 0 && (json[p] == '{' || json[p] == ','));
+
+                int c = idx + pattern.Length;
+                while (c < json.Length && (json[c] == ' ' || json[c] == '\t' || json[c] == '\r' || json[c] == '\n')) c++;
+                bool validColon = (c < json.Length && json[c] == ':');
+
+                if (validPrev && validColon)
+                    return c;
+
+                searchFrom = idx + pattern.Length;
+            }
+            return -1;
+        }
+
         public static string ExtractJsonString(string json, string key)
         {
-            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return null;
-            string pattern = "\"" + key + "\"";
-            int idx = json.IndexOf(pattern, StringComparison.OrdinalIgnoreCase);
-            if (idx < 0) return null;
-            int colon = json.IndexOf(':', idx + pattern.Length);
+            int colon = FindJsonKeyColon(json, key);
             if (colon < 0) return null;
             int qStart = json.IndexOf('"', colon + 1);
             if (qStart < 0) return null;
@@ -2183,11 +2221,7 @@ namespace VzpenjacaKontrola
 
         public static long ExtractJsonLong(string json, string key, long defaultValue)
         {
-            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return defaultValue;
-            string pattern = "\"" + key + "\"";
-            int idx = json.IndexOf(pattern, StringComparison.OrdinalIgnoreCase);
-            if (idx < 0) return defaultValue;
-            int colon = json.IndexOf(':', idx + pattern.Length);
+            int colon = FindJsonKeyColon(json, key);
             if (colon < 0) return defaultValue;
 
             int i = colon + 1;
@@ -2682,7 +2716,7 @@ namespace VzpenjacaKontrola
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_OUT, "Pomanjšaj števce\t(Ctrl -)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_RESET, "Ponastavi velikost števcev\t(Ctrl 0)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
-                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.1.0");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.1.1");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
             }
         }
@@ -2774,7 +2808,7 @@ namespace VzpenjacaKontrola
                 else if (cmd == IDM_VERSION)
                 {
                     MessageBox.Show(
-                        "Nadzorna plošča vzpenjače\nRazličica 1.1.0\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj + "\nMobilni kanal: " + _config.CloudChannelId,
+                        "Nadzorna plošča vzpenjače\nRazličica 1.1.1\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj + "\nMobilni kanal: " + _config.CloudChannelId,
                         "O programu — Vzpenjača",
                         MessageBoxButton.OK,
                         MessageBoxImage.Information);

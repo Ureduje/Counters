@@ -692,6 +692,7 @@ class MainActivity : Activity() {
                     updateTopStatus("Napaka pri pošiljanju ukaza v oblak", ThemeColors.AccentCoral)
                 } else {
                     updateTopStatus("Ukaz poslan (${station.uppercase(Locale.ROOT)})", ThemeColors.AccentBlue)
+                    uiHandler.postDelayed({ fetchLatestCachedCloudState() }, 1200L)
                 }
             }
         } else {
