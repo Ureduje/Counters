@@ -50,6 +50,7 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedReader
@@ -61,19 +62,17 @@ import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URL
+import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
-import java.security.SecureRandom
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import javax.net.ssl.SNIHostName
-import javax.net.ssl.SSLParameters
-import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLSocketFactory
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
@@ -92,6 +91,12 @@ data class StationState(
     val setTimeMs: Long = 0L
 )
 
+data class SavedChannel(
+    val code: String,
+    val label: String = "",
+    val pin: String = ""
+)
+
 class MobileConfig(private val context: Context) {
     private val prefs = context.getSharedPreferences("vzpenjaca_prefs", Context.MODE_PRIVATE)
 
@@ -99,6 +104,7 @@ class MobileConfig(private val context: Context) {
     var cloudServer: String = "https://vzpenjaca-kontrola-default-rtdb.europe-west1.firebasedatabase.app"
     var cloudChannelId: String = "vzpenjaca-3436"
     var cloudPin: String = ""
+    var savedChannels: MutableList<SavedChannel> = mutableListOf()
     var ipZgoraj: String = "10.12.220.34"
     var ipSpodaj: String = "10.12.220.36"
     var soundEnabled: Boolean = true
@@ -151,14 +157,62 @@ class MobileConfig(private val context: Context) {
         if (prefs.contains("showIntervalBgZgoraj")) showIntervalBgZgoraj = prefs.getBoolean("showIntervalBgZgoraj", true)
         if (prefs.contains("showIntervalBgSpodaj")) showIntervalBgSpodaj = prefs.getBoolean("showIntervalBgSpodaj", true)
         if (prefs.contains("rideDurationSec")) rideDurationSec = prefs.getInt("rideDurationSec", 90).coerceIn(10, 600)
+
+        savedChannels.clear()
+        prefs.getString("savedChannelsJson", null)?.takeIf { it.isNotBlank() }?.let { rawJson ->
+            try {
+                val arr = JSONArray(rawJson)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val code = sanitizeChannel(obj.optString("code", ""))
+                    val label = obj.optString("label", "").trim()
+                    val pin = obj.optString("pin", "").trim()
+                    if (code.isNotBlank() && savedChannels.none { it.code.equals(code, ignoreCase = true) }) {
+                        savedChannels.add(SavedChannel(code, label, pin))
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        if (savedChannels.none { it.code.equals(cloudChannelId, ignoreCase = true) }) {
+            savedChannels.add(0, SavedChannel(cloudChannelId, "", cloudPin))
+        }
+    }
+
+    fun upsertSavedChannel(rawCode: String, rawLabel: String = "", rawPin: String = "") {
+        val code = sanitizeChannel(rawCode)
+        val label = rawLabel.trim()
+        val pin = rawPin.trim()
+        val idx = savedChannels.indexOfFirst { it.code.equals(code, ignoreCase = true) }
+        if (idx >= 0) {
+            val existing = savedChannels[idx]
+            savedChannels[idx] = SavedChannel(
+                code = code,
+                label = if (label.isNotEmpty()) label else existing.label,
+                pin = if (pin.isNotEmpty()) pin else existing.pin
+            )
+        } else {
+            savedChannels.add(SavedChannel(code, label, pin))
+        }
     }
 
     fun save() {
+        val arr = JSONArray()
+        for (ch in savedChannels) {
+            arr.put(
+                JSONObject().apply {
+                    put("code", sanitizeChannel(ch.code))
+                    put("label", ch.label.trim())
+                    put("pin", ch.pin.trim())
+                }
+            )
+        }
         prefs.edit()
             .putBoolean("useCloudRelay", useCloudRelay)
             .putString("cloudServer", cloudServer.trimEnd('/'))
             .putString("cloudChannelId", sanitizeChannel(cloudChannelId))
             .putString("cloudPin", cloudPin.trim())
+            .putString("savedChannelsJson", arr.toString())
             .putString("ipZgoraj", ipZgoraj.trim())
             .putString("ipSpodaj", ipSpodaj.trim())
             .putBoolean("soundEnabled", soundEnabled)
@@ -192,8 +246,8 @@ class MobileConfig(private val context: Context) {
 
     companion object {
         const val DEFAULT_VOICE_TEMPLATE = "Vzpenjača je odpeljala. Naslednja vožnja je čez {minute}."
-        const val DEFAULT_NEURAL_VOICE = "sl-SI-PetraNeural"
-        const val MALE_NEURAL_VOICE = "sl-SI-RokNeural"
+        const val DEFAULT_NEURAL_VOICE = "google_tts"
+        const val ANDROID_TTS_VOICE = "android_tts"
 
         fun isFirebaseServer(server: String): Boolean {
             val s = server.trim().lowercase(Locale.ROOT)
@@ -278,6 +332,11 @@ object MobileChimePlayer {
         }
     }
 
+    fun playSpeechPcmSync(samples: ShortArray, sampleRate: Int): Boolean {
+        if (samples.isEmpty()) return false
+        return playPcmSync(samples, sampleRate, isSpeech = true)
+    }
+
     private fun playPcm(samples: ShortArray, sampleRate: Int) {
         if (!enabled || samples.isEmpty()) return
         executor.execute {
@@ -285,47 +344,107 @@ object MobileChimePlayer {
         }
     }
 
-    private fun playPcmSync(samples: ShortArray, sampleRate: Int, isSpeech: Boolean) {
-        try {
-            val bufferBytes = samples.size * 2
-            val track = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val usage = if (isSpeech) AudioAttributes.USAGE_MEDIA else AudioAttributes.USAGE_ASSISTANCE_SONIFICATION
-                val contentType = if (isSpeech) AudioAttributes.CONTENT_TYPE_SPEECH else AudioAttributes.CONTENT_TYPE_SONIFICATION
-                AudioTrack.Builder()
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(usage)
-                            .setContentType(contentType)
-                            .build()
-                    )
-                    .setAudioFormat(
-                        AudioFormat.Builder()
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .setSampleRate(sampleRate)
-                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                            .build()
-                    )
-                    .setBufferSizeInBytes(bufferBytes)
-                    .setTransferMode(AudioTrack.MODE_STATIC)
-                    .build()
-            } else {
-                @Suppress("DEPRECATION")
-                AudioTrack(
-                    AudioManager.STREAM_MUSIC,
+    private fun playPcmSync(samples: ShortArray, sampleRate: Int, isSpeech: Boolean): Boolean {
+        if (samples.isEmpty()) return false
+        var track: AudioTrack? = null
+        return try {
+            if (isSpeech) {
+                val minBuf = AudioTrack.getMinBufferSize(
                     sampleRate,
                     AudioFormat.CHANNEL_OUT_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    bufferBytes,
-                    AudioTrack.MODE_STATIC
-                )
+                    AudioFormat.ENCODING_PCM_16BIT
+                ).coerceAtLeast(4096)
+                val streamBufBytes = max(minBuf * 2, 16384)
+                track = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    AudioTrack.Builder()
+                        .setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_MEDIA)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build()
+                        )
+                        .setAudioFormat(
+                            AudioFormat.Builder()
+                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                .setSampleRate(sampleRate)
+                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                .build()
+                        )
+                        .setBufferSizeInBytes(streamBufBytes)
+                        .setTransferMode(AudioTrack.MODE_STREAM)
+                        .build()
+                } else {
+                    @Suppress("DEPRECATION")
+                    AudioTrack(
+                        AudioManager.STREAM_MUSIC,
+                        sampleRate,
+                        AudioFormat.CHANNEL_OUT_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                        streamBufBytes,
+                        AudioTrack.MODE_STREAM
+                    )
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    track.setVolume(1.0f)
+                }
+                track.play()
+                var offset = 0
+                val chunkLen = 4096
+                while (offset < samples.size) {
+                    val toWrite = min(chunkLen, samples.size - offset)
+                    val written = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        track.write(samples, offset, toWrite, AudioTrack.WRITE_BLOCKING)
+                    } else {
+                        track.write(samples, offset, toWrite)
+                    }
+                    if (written <= 0) break
+                    offset += written
+                }
+                Thread.sleep(110L)
+                track.stop()
+                offset > 0
+            } else {
+                val bufferBytes = samples.size * 2
+                track = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    AudioTrack.Builder()
+                        .setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                .build()
+                        )
+                        .setAudioFormat(
+                            AudioFormat.Builder()
+                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                .setSampleRate(sampleRate)
+                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                .build()
+                        )
+                        .setBufferSizeInBytes(bufferBytes)
+                        .setTransferMode(AudioTrack.MODE_STATIC)
+                        .build()
+                } else {
+                    @Suppress("DEPRECATION")
+                    AudioTrack(
+                        AudioManager.STREAM_MUSIC,
+                        sampleRate,
+                        AudioFormat.CHANNEL_OUT_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                        bufferBytes,
+                        AudioTrack.MODE_STATIC
+                    )
+                }
+                track.write(samples, 0, samples.size)
+                track.play()
+                val durationMs = (samples.size * 1000L) / max(1, sampleRate) + 90L
+                Thread.sleep(durationMs)
+                track.stop()
+                true
             }
-            track.write(samples, 0, samples.size)
-            track.play()
-            val durationMs = (samples.size * 1000L) / max(1, sampleRate) + 90L
-            Thread.sleep(durationMs)
-            track.stop()
-            track.release()
         } catch (_: Throwable) {
+            false
+        } finally {
+            try { track?.release() } catch (_: Throwable) {}
         }
     }
 
@@ -375,10 +494,10 @@ object MobileChimePlayer {
 }
 
 /**
- * Natural Slovenian voice announcement on departure ("Obvestilo ob odhodu").
- * Primary engine: Microsoft Edge Neural TTS (`sl-SI-PetraNeural` / `sl-SI-RokNeural`) with local disk caching
+ * Slovenian voice announcement on departure ("Obvestilo ob odhodu").
+ * Uses Google TTS (Slovenian HTTPS MP3 with local caching + Google Speech Services `com.google.android.tts`)
+ * and Android system TextToSpeech (`android.speech.tts.TextToSpeech`) with automatic mutual fallback
  * and distortion-free dynamic range compression.
- * Fallback engine: Highest-quality local/network Google Android TextToSpeech (`sl-SI`) when offline & uncached.
  */
 object MobileVoiceAnnouncer {
     var voiceEnabled: Boolean = true
@@ -386,120 +505,137 @@ object MobileVoiceAnnouncer {
     var voiceGain: Double = 1.5
     var neuralVoiceName: String = MobileConfig.DEFAULT_NEURAL_VOICE
 
-    private const val TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4"
-    private const val SEC_MS_GEC_VERSION = "2-143.0.3650.75"
-
     private val synthExecutor = Executors.newSingleThreadExecutor()
+    @Volatile
     private var tts: TextToSpeech? = null
     @Volatile
     private var ttsReady: Boolean = false
+    @Volatile
+    private var ttsInitializing: Boolean = false
+    @Volatile
     private var appContext: Context? = null
     @Volatile
     private var lastDepartureSpeechMs: Long = 0L
-    private val pendingGainByUtterance = HashMap<String, Double>()
-    private val pendingFileByUtterance = HashMap<String, File>()
-    private val pendingTextByUtterance = HashMap<String, String>()
+
+    private class SynthWaiter {
+        val latch = CountDownLatch(1)
+        val success = AtomicBoolean(false)
+    }
+
+    private val pendingWaiters = HashMap<String, SynthWaiter>()
 
     fun init(context: Context) {
         val ctx = context.applicationContext
         appContext = ctx
-        initLocalFallbackTts(ctx)
+        initAndroidTts(ctx)
         prewarmCommonAnnouncements()
     }
 
     fun prewarmCommonAnnouncements() {
         val ctx = appContext ?: return
         val tpl = voiceTemplate
-        val voice = neuralVoiceName
         synthExecutor.execute {
             for (mins in intArrayOf(6, 10)) {
                 try {
                     val text = buildAnnouncementText(tpl, mins)
-                    getOrFetchNeuralMp3(ctx, text, voice)
+                    getOrFetchGoogleMp3(ctx, text)
                 } catch (_: Throwable) {
                 }
             }
         }
     }
 
-    private fun initLocalFallbackTts(ctx: Context) {
-        if (tts != null) return
+    @Synchronized
+    private fun initAndroidTts(ctx: Context) {
+        if (ttsReady || ttsInitializing) return
+        ttsInitializing = true
         try {
-            val listener = TextToSpeech.OnInitListener { status ->
-                if (status == TextToSpeech.SUCCESS) {
-                    val engine = tts ?: return@OnInitListener
-                    configureSlovenianVoice(engine)
-                    engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                        override fun onStart(utteranceId: String?) {}
-
-                        override fun onDone(utteranceId: String?) {
-                            if (utteranceId == null) return
-                            val wavFile: File?
-                            val gain: Double
-                            synchronized(pendingGainByUtterance) {
-                                wavFile = pendingFileByUtterance.remove(utteranceId)
-                                gain = pendingGainByUtterance.remove(utteranceId) ?: 1.5
-                                pendingTextByUtterance.remove(utteranceId)
-                            }
-                            if (wavFile != null && wavFile.exists()) {
-                                try {
-                                    val parsed = readAndAmplifyWav(wavFile, gain)
-                                    if (parsed != null) {
-                                        MobileChimePlayer.playSpeechPcm(parsed.first, parsed.second)
-                                    }
-                                } catch (_: Throwable) {
-                                } finally {
-                                    try { wavFile.delete() } catch (_: Throwable) {}
-                                }
-                            }
-                        }
-
-                        @Deprecated("Deprecated in Java")
-                        override fun onError(utteranceId: String?) {
-                            handleSynthError(utteranceId)
-                        }
-
-                        override fun onError(utteranceId: String?, errorCode: Int) {
-                            handleSynthError(utteranceId)
-                        }
-                    })
-                    ttsReady = true
+            var googleEngineRef: TextToSpeech? = null
+            val googleListener = TextToSpeech.OnInitListener { status ->
+                if (status == TextToSpeech.SUCCESS && googleEngineRef != null) {
+                    onEngineReady(googleEngineRef!!)
+                } else {
+                    try { googleEngineRef?.shutdown() } catch (_: Throwable) {}
+                    initDefaultAndroidTts(ctx)
                 }
             }
-            // Prefer Google TTS engine for highest quality Slovenian fallback
-            tts = try {
-                TextToSpeech(ctx, listener, "com.google.android.tts")
+            googleEngineRef = try {
+                TextToSpeech(ctx, googleListener, "com.google.android.tts")
             } catch (_: Throwable) {
-                TextToSpeech(ctx, listener)
+                null
+            }
+            if (googleEngineRef == null) {
+                initDefaultAndroidTts(ctx)
             }
         } catch (_: Throwable) {
+            ttsInitializing = false
         }
     }
 
-    private fun handleSynthError(utteranceId: String?) {
-        if (utteranceId == null) return
-        val fallbackText: String?
-        val wavFile: File?
-        synchronized(pendingGainByUtterance) {
-            wavFile = pendingFileByUtterance.remove(utteranceId)
-            pendingGainByUtterance.remove(utteranceId)
-            fallbackText = pendingTextByUtterance.remove(utteranceId)
-        }
-        try { wavFile?.delete() } catch (_: Throwable) {}
-        if (!fallbackText.isNullOrBlank()) {
-            try {
-                val params = Bundle().apply {
-                    putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
-                    putString(TextToSpeech.Engine.KEY_FEATURE_NETWORK_SYNTHESIS, "true")
+    private fun initDefaultAndroidTts(ctx: Context) {
+        try {
+            var defaultEngineRef: TextToSpeech? = null
+            val defaultListener = TextToSpeech.OnInitListener { status ->
+                if (status == TextToSpeech.SUCCESS && defaultEngineRef != null) {
+                    onEngineReady(defaultEngineRef!!)
+                } else {
+                    try { defaultEngineRef?.shutdown() } catch (_: Throwable) {}
+                    ttsInitializing = false
                 }
-                tts?.speak(fallbackText, TextToSpeech.QUEUE_FLUSH, params, "${utteranceId}_direct")
-            } catch (_: Throwable) {
             }
+            defaultEngineRef = TextToSpeech(ctx, defaultListener)
+        } catch (_: Throwable) {
+            ttsInitializing = false
+        }
+    }
+
+    private fun onEngineReady(engine: TextToSpeech) {
+        tts = engine
+        configureSlovenianVoice(engine)
+        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+
+            override fun onDone(utteranceId: String?) {
+                if (utteranceId == null) return
+                val waiter = synchronized(pendingWaiters) { pendingWaiters.remove(utteranceId) }
+                if (waiter != null) {
+                    waiter.success.set(true)
+                    waiter.latch.countDown()
+                }
+            }
+
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                markWaiterFailed(utteranceId)
+            }
+
+            override fun onError(utteranceId: String?, errorCode: Int) {
+                markWaiterFailed(utteranceId)
+            }
+        })
+        ttsReady = true
+        ttsInitializing = false
+    }
+
+    private fun markWaiterFailed(utteranceId: String?) {
+        if (utteranceId == null) return
+        val waiter = synchronized(pendingWaiters) { pendingWaiters.remove(utteranceId) }
+        if (waiter != null) {
+            waiter.success.set(false)
+            waiter.latch.countDown()
         }
     }
 
     private fun configureSlovenianVoice(engine: TextToSpeech) {
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                engine.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+            }
             val slLocale = Locale("sl", "SI")
             val res = engine.setLanguage(slLocale)
             if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
@@ -529,8 +665,8 @@ object MobileVoiceAnnouncer {
     private fun scoreAndroidVoice(v: Voice): Int {
         var score = v.quality
         val name = v.name.lowercase(Locale.ROOT)
-        if (name.contains("network") || name.contains("wavenet") || name.contains("neural")) score += 500
-        if (!v.isNetworkConnectionRequired) score += 50
+        if (!v.isNetworkConnectionRequired) score += 200
+        if (name.contains("wavenet") || name.contains("neural") || name.contains("local")) score += 150
         return score
     }
 
@@ -544,42 +680,56 @@ object MobileVoiceAnnouncer {
         speakCustomText(text, voiceGain, neuralVoiceName)
     }
 
-    fun speakCustomText(text: String, gainMultiplier: Double, preferredNeuralVoice: String = neuralVoiceName) {
+    fun speakCustomText(text: String, gainMultiplier: Double, preferredVoiceMode: String = neuralVoiceName) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
         val gain = gainMultiplier.coerceIn(0.5, 5.0)
         val ctx = appContext ?: return
+        val preferAndroidFirst = preferredVoiceMode.equals(MobileConfig.ANDROID_TTS_VOICE, ignoreCase = true)
 
         synthExecutor.execute {
-            val mp3File = getOrFetchNeuralMp3(ctx, trimmed, preferredNeuralVoice)
-            if (mp3File != null && mp3File.exists() && mp3File.length() > 256L) {
-                val decoded = decodeMp3ToPcm(mp3File)
-                if (decoded != null && decoded.first.isNotEmpty()) {
-                    val amplified = amplifySpeechPcm(decoded.first, decoded.second, gain)
-                    MobileChimePlayer.playSpeechPcm(amplified, decoded.second)
-                    return@execute
+            if (preferAndroidFirst) {
+                if (!speakWithAndroidTts(ctx, trimmed, gain)) {
+                    speakWithGoogleHttpTts(ctx, trimmed, gain)
                 }
-                if (playMp3WithMediaPlayer(mp3File, gain)) {
-                    return@execute
+            } else {
+                if (!speakWithGoogleHttpTts(ctx, trimmed, gain)) {
+                    speakWithAndroidTts(ctx, trimmed, gain)
                 }
             }
-            speakWithAndroidTtsFallback(ctx, trimmed, gain)
         }
     }
 
-    private fun getOrFetchNeuralMp3(ctx: Context, text: String, voiceName: String): File? {
+    private fun speakWithGoogleHttpTts(ctx: Context, trimmed: String, gain: Double): Boolean {
+        val mp3File = getOrFetchGoogleMp3(ctx, trimmed)
+        if (mp3File != null && mp3File.exists() && mp3File.length() > 256L) {
+            val decoded = decodeMp3ToPcm(mp3File)
+            if (decoded != null && decoded.first.isNotEmpty()) {
+                val amplified = amplifySpeechPcm(decoded.first, decoded.second, gain)
+                if (MobileChimePlayer.playSpeechPcmSync(amplified, decoded.second)) {
+                    return true
+                }
+            }
+            if (playMp3WithMediaPlayer(mp3File, gain)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun getOrFetchGoogleMp3(ctx: Context, text: String): File? {
         try {
-            val cacheDir = File(ctx.cacheDir, "neural_tts_cache")
+            val cacheDir = File(ctx.cacheDir, "google_tts_cache")
             if (!cacheDir.exists()) cacheDir.mkdirs()
 
-            val hash = sha256Hex("$voiceName|$text").substring(0, 28)
+            val hash = sha256Hex("google_sl|$text").substring(0, 28)
             val cachedFile = File(cacheDir, "tts_$hash.mp3")
-            if (cachedFile.exists() && cachedFile.length() > 512L) {
+            if (cachedFile.exists() && cachedFile.length() > 256L) {
                 return cachedFile
             }
 
-            val mp3Bytes = synthesizeEdgeNeuralMp3(text, voiceName)
-            if (mp3Bytes != null && mp3Bytes.size > 512) {
+            val mp3Bytes = synthesizeGoogleTtsMp3(text)
+            if (mp3Bytes != null && mp3Bytes.size > 256) {
                 val tmpFile = File(cacheDir, "tts_${hash}_tmp.mp3")
                 tmpFile.writeBytes(mp3Bytes)
                 if (cachedFile.exists()) cachedFile.delete()
@@ -591,117 +741,39 @@ object MobileVoiceAnnouncer {
         return null
     }
 
-    private fun synthesizeEdgeNeuralMp3(text: String, voiceName: String): ByteArray? {
-        val host = "speech.platform.bing.com"
-        val connId = UUID.randomUUID().toString().replace("-", "")
-        val secMsGec = generateSecMsGec()
-        val path = "/consumer/speech/synthesize/readaloud/edge/v1" +
-            "?TrustedClientToken=$TRUSTED_CLIENT_TOKEN" +
-            "&Sec-MS-GEC=$secMsGec" +
-            "&Sec-MS-GEC-Version=$SEC_MS_GEC_VERSION" +
-            "&ConnectionId=$connId"
-
-        val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
-        (factory.createSocket() as SSLSocket).use { socket ->
-            socket.soTimeout = 7000
-            socket.connect(InetSocketAddress(host, 443), 5000)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                val params = socket.sslParameters
-                params.serverNames = listOf(SNIHostName(host))
-                socket.sslParameters = params
-            }
-            socket.startHandshake()
-
-            val keyBytes = ByteArray(16)
-            SecureRandom().nextBytes(keyBytes)
-            val wsKey = Base64.encodeToString(keyBytes, Base64.NO_WRAP)
-
-            val handshake = "GET $path HTTP/1.1\r\n" +
-                "Host: $host\r\n" +
-                "Upgrade: websocket\r\n" +
-                "Connection: Upgrade\r\n" +
-                "Pragma: no-cache\r\n" +
-                "Cache-Control: no-cache\r\n" +
-                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0\r\n" +
-                "Origin: chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold\r\n" +
-                "Sec-WebSocket-Version: 13\r\n" +
-                "Sec-WebSocket-Key: $wsKey\r\n\r\n"
-
-            val out = socket.getOutputStream()
-            out.write(handshake.toByteArray(StandardCharsets.US_ASCII))
-            out.flush()
-
-            val inp = DataInputStream(BufferedInputStream(socket.getInputStream()))
-            val statusLine = readAsciiLine(inp) ?: return null
-            if (!statusLine.contains("101")) return null
-            while (true) {
-                val line = readAsciiLine(inp) ?: break
-                if (line.isEmpty()) break
-            }
-
-            val configPayload = "Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n" +
-                "{\"context\":{\"synthesis\":{\"audio\":{\"metadataoptions\":{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"false\"},\"outputFormat\":\"audio-24khz-48kbitrate-mono-mp3\"}}}}"
-            sendWebSocketTextFrame(out, configPayload)
-
-            val reqId = UUID.randomUUID().toString().replace("-", "")
-            val escapedText = escapeXml(text)
-            val ssmlPayload = "X-RequestId:$reqId\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n" +
-                "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='sl-SI'>" +
-                "<voice name='$voiceName'>" +
-                "<prosody pitch='+0Hz' rate='-2%' volume='+0%'>$escapedText</prosody>" +
-                "</voice></speak>"
-            sendWebSocketTextFrame(out, ssmlPayload)
-
-            val audioStream = ByteArrayOutputStream()
-            while (true) {
-                val b0 = inp.read()
-                if (b0 == -1) break
-                val opcode = b0 and 0x0F
-                val b1 = inp.read()
-                if (b1 == -1) break
-                val masked = (b1 and 0x80) != 0
-                var len = (b1 and 0x7F).toLong()
-                if (len == 126L) {
-                    len = ((inp.read() and 0xFF) shl 8 or (inp.read() and 0xFF)).toLong()
-                } else if (len == 127L) {
-                    len = inp.readLong()
+    private fun synthesizeGoogleTtsMp3(text: String): ByteArray? {
+        val safeText = if (text.length > 195) text.substring(0, 195) else text
+        val encoded = URLEncoder.encode(safeText, "UTF-8")
+        val urls = arrayOf(
+            "https://translate.googleapis.com/translate_tts?ie=UTF-8&client=gtx&tl=sl&q=$encoded",
+            "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=sl&q=$encoded"
+        )
+        for (urlStr in urls) {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 5000
+                    readTimeout = 6000
+                    setRequestProperty(
+                        "User-Agent",
+                        "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                    )
+                    setRequestProperty("Referer", "https://translate.google.com/")
+                    setRequestProperty("Accept", "audio/mpeg, audio/*;q=0.9, */*;q=0.8")
                 }
-                val maskKey = ByteArray(4)
-                if (masked) inp.readFully(maskKey)
-                val payload = ByteArray(len.toInt())
-                inp.readFully(payload)
-                if (masked) {
-                    for (i in payload.indices) {
-                        payload[i] = (payload[i].toInt() xor maskKey[i % 4].toInt()).toByte()
+                if (conn.responseCode in 200..299) {
+                    val bytes = conn.inputStream.use { it.readBytes() }
+                    if (bytes.size > 256) {
+                        return bytes
                     }
                 }
-                if (opcode == 1) {
-                    val str = String(payload, StandardCharsets.UTF_8)
-                    if (str.contains("Path:turn.end")) break
-                } else if (opcode == 2 && payload.size > 2) {
-                    val headerLen = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
-                    val audioStart = 2 + headerLen
-                    if (audioStart < payload.size) {
-                        val headerStr = String(payload, 2, headerLen, StandardCharsets.UTF_8)
-                        if (headerStr.contains("Path:audio")) {
-                            audioStream.write(payload, audioStart, payload.size - audioStart)
-                        }
-                    }
-                } else if (opcode == 8) {
-                    break
-                }
+            } catch (_: Throwable) {
+            } finally {
+                try { conn?.disconnect() } catch (_: Throwable) {}
             }
-            return audioStream.toByteArray()
         }
-    }
-
-    private fun generateSecMsGec(): String {
-        val winEpochOffset = 11644473600L
-        var ticks = (System.currentTimeMillis() / 1000.0) + winEpochOffset
-        ticks -= ticks % 300.0
-        val ticks100ns = (ticks * 1e7).toLong()
-        val strToHash = "$ticks100ns$TRUSTED_CLIENT_TOKEN"
-        return sha256Hex(strToHash).uppercase(Locale.ROOT)
+        return null
     }
 
     private fun sha256Hex(input: String): String {
@@ -711,53 +783,6 @@ object MobileVoiceAnnouncer {
             sb.append(String.format(Locale.US, "%02x", b))
         }
         return sb.toString()
-    }
-
-    private fun escapeXml(s: String): String {
-        return s
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("\"", "&quot;")
-            .replace("'", "&apos;")
-    }
-
-    private fun readAsciiLine(inp: DataInputStream): String? {
-        val baos = ByteArrayOutputStream()
-        while (true) {
-            val b = inp.read()
-            if (b == -1) return if (baos.size() == 0) null else String(baos.toByteArray(), StandardCharsets.US_ASCII)
-            if (b == '\n'.code) break
-            if (b != '\r'.code) baos.write(b)
-        }
-        return String(baos.toByteArray(), StandardCharsets.US_ASCII)
-    }
-
-    private fun sendWebSocketTextFrame(out: java.io.OutputStream, text: String) {
-        val payload = text.toByteArray(StandardCharsets.UTF_8)
-        val mask = ByteArray(4)
-        SecureRandom().nextBytes(mask)
-        val frame = ByteArrayOutputStream()
-        frame.write(0x81)
-        if (payload.size < 126) {
-            frame.write(0x80 or payload.size)
-        } else if (payload.size <= 65535) {
-            frame.write(0x80 or 126)
-            frame.write((payload.size shr 8) and 0xFF)
-            frame.write(payload.size and 0xFF)
-        } else {
-            frame.write(0x80 or 127)
-            val len = payload.size.toLong()
-            for (i in 7 downTo 0) {
-                frame.write(((len shr (i * 8)) and 0xFF).toInt())
-            }
-        }
-        frame.write(mask)
-        for (i in payload.indices) {
-            frame.write(payload[i].toInt() xor mask[i % 4].toInt())
-        }
-        out.write(frame.toByteArray())
-        out.flush()
     }
 
     private fun decodeMp3ToPcm(mp3File: File): Pair<ShortArray, Int>? {
@@ -855,6 +880,7 @@ object MobileVoiceAnnouncer {
                             channels = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
                         }
                     }
+                    else -> break
                 }
             }
 
@@ -899,6 +925,7 @@ object MobileVoiceAnnouncer {
                     setAudioStreamType(AudioManager.STREAM_MUSIC)
                 }
                 setDataSource(mp3File.absolutePath)
+                setVolume(1.0f, 1.0f)
                 prepare()
             }
             if (gainMultiplier > 1.05 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
@@ -912,7 +939,7 @@ object MobileVoiceAnnouncer {
                 }
             }
             player.start()
-            val waitMs = player.duration.coerceIn(500, 15000).toLong() + 120L
+            val waitMs = player.duration.coerceIn(500, 15000).toLong() + 140L
             Thread.sleep(waitMs)
             true
         } catch (_: Throwable) {
@@ -924,37 +951,77 @@ object MobileVoiceAnnouncer {
         }
     }
 
-    private fun speakWithAndroidTtsFallback(ctx: Context, trimmed: String, gain: Double) {
-        val engine = tts
-        if (engine == null || !ttsReady) {
-            initLocalFallbackTts(ctx)
-            return
+    private fun speakWithAndroidTts(ctx: Context, trimmed: String, gain: Double): Boolean {
+        if (tts == null || !ttsReady) {
+            initAndroidTts(ctx)
+            for (i in 0 until 15) {
+                if (ttsReady && tts != null) break
+                try { Thread.sleep(100L) } catch (_: Throwable) {}
+            }
         }
+        val engine = tts
+        if (engine == null || !ttsReady) return false
+
+        val utteranceId = "utt_${System.currentTimeMillis()}_${(100..999).random()}"
+        val outFile = File(ctx.cacheDir, "$utteranceId.wav")
         try {
-            val utteranceId = "utt_${System.currentTimeMillis()}_${(100..999).random()}"
-            val outFile = File(ctx.cacheDir, "$utteranceId.wav")
-            synchronized(pendingGainByUtterance) {
-                pendingGainByUtterance[utteranceId] = gain
-                pendingFileByUtterance[utteranceId] = outFile
-                pendingTextByUtterance[utteranceId] = trimmed
+            val waiter = SynthWaiter()
+            synchronized(pendingWaiters) {
+                pendingWaiters[utteranceId] = waiter
             }
             val params = Bundle().apply {
+                putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
                 putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
-                putString(TextToSpeech.Engine.KEY_FEATURE_NETWORK_SYNTHESIS, "true")
             }
-            val code = engine.synthesizeToFile(trimmed, params, outFile, utteranceId)
-            if (code != TextToSpeech.SUCCESS) {
-                handleSynthError(utteranceId)
+            val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                engine.synthesizeToFile(trimmed, params, outFile, utteranceId)
+            } else {
+                TextToSpeech.ERROR
+            }
+            if (code == TextToSpeech.SUCCESS) {
+                waiter.latch.await(3800L, TimeUnit.MILLISECONDS)
+                synchronized(pendingWaiters) { pendingWaiters.remove(utteranceId) }
+                if (waiter.success.get() && outFile.exists() && outFile.length() > 64L) {
+                    val parsed = readAndAmplifyWav(outFile, gain)
+                    if (parsed != null && parsed.first.isNotEmpty()) {
+                        if (MobileChimePlayer.playSpeechPcmSync(parsed.first, parsed.second)) {
+                            return true
+                        }
+                    }
+                    val decoded = decodeMp3ToPcm(outFile)
+                    if (decoded != null && decoded.first.isNotEmpty()) {
+                        val amplified = amplifySpeechPcm(decoded.first, decoded.second, gain)
+                        if (MobileChimePlayer.playSpeechPcmSync(amplified, decoded.second)) {
+                            return true
+                        }
+                    }
+                    if (playMp3WithMediaPlayer(outFile, gain)) {
+                        return true
+                    }
+                }
+            } else {
+                synchronized(pendingWaiters) { pendingWaiters.remove(utteranceId) }
             }
         } catch (_: Throwable) {
-            try {
-                val params = Bundle().apply {
-                    putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
-                    putString(TextToSpeech.Engine.KEY_FEATURE_NETWORK_SYNTHESIS, "true")
-                }
-                engine.speak(trimmed, TextToSpeech.QUEUE_FLUSH, params, "direct_${System.currentTimeMillis()}")
-            } catch (_: Throwable) {
+            synchronized(pendingWaiters) { pendingWaiters.remove(utteranceId) }
+        } finally {
+            try { if (outFile.exists()) outFile.delete() } catch (_: Throwable) {}
+        }
+
+        return try {
+            val speakParams = Bundle().apply {
+                putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
+                putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
             }
+            val res = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                engine.speak(trimmed, TextToSpeech.QUEUE_FLUSH, speakParams, "direct_$utteranceId")
+            } else {
+                @Suppress("DEPRECATION")
+                engine.speak(trimmed, TextToSpeech.QUEUE_FLUSH, null)
+            }
+            res == TextToSpeech.SUCCESS
+        } catch (_: Throwable) {
+            false
         }
     }
 
@@ -1018,8 +1085,10 @@ object MobileVoiceAnnouncer {
         val bytes = file.readBytes()
         if (bytes.size <= 44) return null
 
+        var audioFormat = 1
         var sampleRate = 22050
         var channels = 1
+        var bitsPerSample = 16
         var dataOffset = 44
         var dataLength = bytes.size - 44
 
@@ -1032,35 +1101,57 @@ object MobileVoiceAnnouncer {
             while (pos + 8 <= bytes.size) {
                 val chunkId = String(bytes, pos, 4, StandardCharsets.US_ASCII)
                 val chunkSize = ByteBuffer.wrap(bytes, pos + 4, 4).order(ByteOrder.LITTLE_ENDIAN).int
-                if (chunkSize < 0) break
                 if (chunkId == "fmt " && pos + 8 + 16 <= bytes.size) {
                     val fmtBuf = ByteBuffer.wrap(bytes, pos + 8, 16).order(ByteOrder.LITTLE_ENDIAN)
-                    val audioFormat = fmtBuf.short.toInt()
+                    audioFormat = fmtBuf.short.toInt() and 0xFFFF
                     channels = fmtBuf.short.toInt().coerceAtLeast(1)
                     sampleRate = fmtBuf.int.coerceIn(8000, 96000)
-                    if (audioFormat != 1) return null // Only PCM 16-bit
+                    fmtBuf.int // byteRate
+                    fmtBuf.short // blockAlign
+                    bitsPerSample = fmtBuf.short.toInt().coerceAtLeast(8)
                 } else if (chunkId == "data") {
                     dataOffset = pos + 8
-                    dataLength = min(chunkSize, bytes.size - dataOffset)
+                    val rem = bytes.size - dataOffset
+                    dataLength = if (chunkSize <= 0 || chunkSize > rem) rem else chunkSize
                     break
                 }
+                if (chunkSize < 0) break
                 pos += 8 + chunkSize + (chunkSize and 1)
             }
         }
 
         if (dataLength <= 2 || dataOffset + dataLength > bytes.size) return null
-        val totalShorts = dataLength / 2
-        val frameCount = totalShorts / channels
-        if (frameCount <= 0) return null
 
-        val rawSamples = ShortArray(frameCount)
-        val bb = ByteBuffer.wrap(bytes, dataOffset, frameCount * channels * 2).order(ByteOrder.LITTLE_ENDIAN)
-        for (i in 0 until frameCount) {
-            var sum = 0
-            for (c in 0 until channels) {
-                sum += bb.short.toInt()
+        val rawSamples: ShortArray
+        if (audioFormat == 3 && bitsPerSample == 32) {
+            val totalFloats = dataLength / 4
+            val frameCount = totalFloats / channels
+            if (frameCount <= 0) return null
+            rawSamples = ShortArray(frameCount)
+            val bb = ByteBuffer.wrap(bytes, dataOffset, frameCount * channels * 4).order(ByteOrder.LITTLE_ENDIAN)
+            for (i in 0 until frameCount) {
+                var sum = 0f
+                for (c in 0 until channels) {
+                    sum += bb.float
+                }
+                val s = ((sum / channels) * 32767f).roundToInt().coerceIn(-32768, 32767)
+                rawSamples[i] = s.toShort()
             }
-            rawSamples[i] = (sum / channels).coerceIn(-32768, 32767).toShort()
+        } else if (audioFormat == 1 && bitsPerSample == 16) {
+            val totalShorts = dataLength / 2
+            val frameCount = totalShorts / channels
+            if (frameCount <= 0) return null
+            rawSamples = ShortArray(frameCount)
+            val bb = ByteBuffer.wrap(bytes, dataOffset, frameCount * channels * 2).order(ByteOrder.LITTLE_ENDIAN)
+            for (i in 0 until frameCount) {
+                var sum = 0
+                for (c in 0 until channels) {
+                    sum += bb.short.toInt()
+                }
+                rawSamples[i] = (sum / channels).coerceIn(-32768, 32767).toShort()
+            }
+        } else {
+            return null
         }
 
         val outSamples = amplifySpeechPcm(rawSamples, sampleRate, gainMultiplier)
@@ -1383,8 +1474,6 @@ class MainActivity : Activity() {
                 showSettingsDialog()
             }
         }
-        val initMode = if (config.useCloudRelay) "Firebase · ${config.cloudChannelId}" else "LAN · ${config.ipZgoraj} / ${config.ipSpodaj}"
-        stationPager.updateFooterStatus(isConnected = false, modeInfo = "Povezovanje... ($initMode)")
         root.addView(stationPager)
         updateActiveStationTitle(0)
 
@@ -1554,14 +1643,6 @@ class MainActivity : Activity() {
                 lblModeStatus.setTextColor(ThemeColors.AccentRed)
                 (statusBadgeDot.background as? GradientDrawable)?.setColor(ThemeColors.AccentRed)
                 statusRow.visibility = View.VISIBLE
-            }
-            if (::stationPager.isInitialized) {
-                val mode = if (config.useCloudRelay) {
-                    if (isConnected) "Firebase · ${config.cloudChannelId}" else "Ni povezave (Firebase)"
-                } else {
-                    if (isConnected) "LAN · ${config.ipZgoraj} / ${config.ipSpodaj}" else "Ni povezave (LAN)"
-                }
-                stationPager.updateFooterStatus(isConnected, mode)
             }
         }
     }
@@ -1885,168 +1966,570 @@ class MainActivity : Activity() {
     }
 
     private fun showSettingsDialog() {
-        val scroll = ScrollView(this)
+        var useCloudMode = config.useCloudRelay
+        var soundOn = config.soundEnabled
+        var voiceOn = config.voiceAnnouncementEnabled
+        var isAndroidVoice = config.voiceAnnouncementVoice.equals(MobileConfig.ANDROID_TTS_VOICE, ignoreCase = true)
+        val initialStep = ((config.voiceAnnouncementGain.coerceIn(1.0, 4.0) - 1.0) / 0.25).roundToInt().coerceIn(0, 12)
+        var currentGain = 1.0 + initialStep * 0.25
+
+        val workingChannels = config.savedChannels.map { it.copy() }.toMutableList()
+        if (workingChannels.none { it.code.equals(config.cloudChannelId, ignoreCase = true) }) {
+            workingChannels.add(0, SavedChannel(config.cloudChannelId, "", config.cloudPin))
+        }
+
+        val rootDialogLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat()
+                setColor(ThemeColors.WindowBg)
+                setStroke(dp(1), ThemeColors.CardBorder)
+            }
+        }
+
+        // Sticky Top Header
+        val headerBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(14), dp(14), dp(12))
+        }
+        val headerTitleCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val lblDialogTitle = TextView(this).apply {
+            text = "Nastavitve"
+            setTextColor(ThemeColors.TextPrimary)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        }
+        val lblDialogSub = TextView(this).apply {
+            text = "Povezava, shranjeni PC-ji, vožnja in zvok"
+            setTextColor(ThemeColors.TextMuted)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+        }
+        headerTitleCol.addView(lblDialogTitle)
+        headerTitleCol.addView(lblDialogSub)
+
+        val btnCloseDialog = TextView(this).apply {
+            text = "✕"
+            gravity = Gravity.CENTER
+            setTextColor(ThemeColors.TextSecondary)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(8).toFloat()
+                setColor(ThemeColors.BtnBg)
+                setStroke(dp(1), ThemeColors.BtnBorder)
+            }
+            layoutParams = LinearLayout.LayoutParams(dp(34), dp(34))
+        }
+        headerBar.addView(headerTitleCol)
+        headerBar.addView(btnCloseDialog)
+        rootDialogLayout.addView(headerBar)
+
+        rootDialogLayout.addView(View(this).apply {
+            setBackgroundColor(ThemeColors.Divider)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1))
+        })
+
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+        }
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(14), dp(20), dp(8))
+            setPadding(dp(14), dp(12), dp(14), dp(12))
         }
 
-        val modeGroup = RadioGroup(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        val rbCloud = RadioButton(this).apply {
-            text = "Oblačni most prek PC-ja (deluje od koderkoli - 4G/5G/Wi-Fi)"
-            setTextColor(ThemeColors.TextPrimary)
-            isChecked = config.useCloudRelay
-        }
-        val rbLan = RadioButton(this).apply {
-            text = "Lokalno omrežje Wi-Fi / VPN (neposredno na 10.12.220.34 / .36)"
-            setTextColor(ThemeColors.TextPrimary)
-            isChecked = !config.useCloudRelay
-        }
-        modeGroup.addView(rbCloud)
-        modeGroup.addView(rbLan)
-        container.addView(modeGroup)
+        // =========================================================================
+        // 1. POVEZAVA & SHRANJENI KANALI (PC-JI)
+        // =========================================================================
+        val connCard = createSettingsCard()
+        connCard.addView(createSectionHeader("POVEZAVA", "Izberite način komunikacije s postajama"))
 
-        container.addView(createSettingsLabel("Firebase Realtime Database URL (ali ntfy strežnik):"))
-        val edtServer = createSettingsInput(config.cloudServer).apply {
-            hint = "https://ime-projekta-default-rtdb.europe-west1.firebasedatabase.app"
-        }
-        container.addView(edtServer)
-
-        container.addView(createSettingsLabel("Koda kanala (ista kot v PC aplikaciji):"))
-        val edtChannel = createSettingsInput(config.cloudChannelId)
-        container.addView(edtChannel)
-
-        container.addView(createSettingsLabel("Varnostni PIN (če je nastavljen na PC-ju):"))
-        val edtPin = createSettingsInput(config.cloudPin).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
-        container.addView(edtPin)
-
-        container.addView(createSettingsLabel("IP Zgornja postaja (za neposredni LAN način):"))
-        val edtIpZgoraj = createSettingsInput(config.ipZgoraj)
-        container.addView(edtIpZgoraj)
-
-        container.addView(createSettingsLabel("IP Spodnja postaja (za neposredni LAN način):"))
-        val edtIpSpodaj = createSettingsInput(config.ipSpodaj)
-        container.addView(edtIpSpodaj)
-
-        val chkSound = CheckBox(this).apply {
-            text = "Zvočna opozorila (zvončki) na telefonu"
-            setTextColor(ThemeColors.TextPrimary)
-            isChecked = config.soundEnabled
-        }
-        container.addView(chkSound)
-
-        // Trajanje vožnje vzpenjače
-        val rideDivider = View(this).apply {
-            setBackgroundColor(ThemeColors.Divider)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)).apply {
-                topMargin = dp(12)
+        val modeSegmentRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(9).toFloat()
+                setColor(ThemeColors.SubCardBg)
+                setStroke(dp(1), ThemeColors.Divider)
+            }
+            setPadding(dp(3), dp(3), dp(3), dp(3))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(6)
                 bottomMargin = dp(10)
             }
         }
-        container.addView(rideDivider)
 
-        val lblRideTitle = TextView(this).apply {
-            text = "Trajanje vožnje vzpenjače"
-            setTextColor(ThemeColors.TextPrimary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        val btnModeCloud = TextView(this).apply {
+            text = "Oblačni most (PC)"
+            gravity = Gravity.CENTER
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(0, 0, 0, dp(2))
+            setPadding(dp(8), dp(9), dp(8), dp(9))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        container.addView(lblRideTitle)
+        val btnModeLan = TextView(this).apply {
+            text = "Lokalni LAN / VPN"
+            gravity = Gravity.CENTER
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(8), dp(9), dp(8), dp(9))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        modeSegmentRow.addView(btnModeCloud)
+        modeSegmentRow.addView(btnModeLan)
+        connCard.addView(modeSegmentRow)
 
-        val lblRideSub = TextView(this).apply {
-            text = "Čas vožnje v sekundah za animacijo položaja kabine na tirih:"
-            setTextColor(ThemeColors.TextMuted)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, 0, 0, dp(6))
+        val cloudSection = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
         }
-        container.addView(lblRideSub)
+        val lanSection = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        // Saved Channels (PCs) selector
+        val savedHeaderRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(2), 0, dp(4))
+        }
+        val lblSavedChannels = TextView(this).apply {
+            text = "Shranjeni PC kanali (tapnite za izbiro):"
+            setTextColor(ThemeColors.TextSecondary)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        savedHeaderRow.addView(lblSavedChannels)
+        cloudSection.addView(savedHeaderRow)
+
+        val savedChannelsListLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(8)
+            }
+        }
+        cloudSection.addView(savedChannelsListLayout)
+
+        val currentSaved = workingChannels.firstOrNull { it.code.equals(config.cloudChannelId, ignoreCase = true) }
+        val channelInputRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.BOTTOM
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val colChannelCode = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.15f).apply {
+                rightMargin = dp(6)
+            }
+        }
+        colChannelCode.addView(createSettingsLabel("Koda kanala (PC):"))
+        val edtChannel = createSettingsInput(config.cloudChannelId).apply {
+            hint = "vzpenjaca-3436"
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        }
+        colChannelCode.addView(edtChannel)
+
+        val colChannelLabel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        colChannelLabel.addView(createSettingsLabel("Ime PC-ja (neobvezno):"))
+        val edtChannelLabel = createSettingsInput(currentSaved?.label ?: "").apply {
+            hint = "npr. Glavni PC"
+        }
+        colChannelLabel.addView(edtChannelLabel)
+
+        channelInputRow.addView(colChannelCode)
+        channelInputRow.addView(colChannelLabel)
+        cloudSection.addView(channelInputRow)
+
+        cloudSection.addView(createSettingsLabel("Varnostni PIN (če je nastavljen na PC-ju):"))
+        val edtPin = createSettingsInput(config.cloudPin).apply {
+            hint = "Brez PIN-a (prazno)"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        cloudSection.addView(edtPin)
+
+        var rebuildSavedChannelsList: (() -> Unit)? = null
+
+        val btnAddOrUpdateChannel = createDialogMiniButton("+ Shrani kanal na seznam PC-jev", accent = true) {
+            val code = MobileConfig.sanitizeChannel(edtChannel.text.toString())
+            val label = edtChannelLabel.text.toString().trim()
+            val pin = edtPin.text.toString().trim()
+            edtChannel.setText(code)
+            val idx = workingChannels.indexOfFirst { it.code.equals(code, ignoreCase = true) }
+            if (idx >= 0) {
+                workingChannels[idx] = SavedChannel(code, label, pin)
+            } else {
+                workingChannels.add(SavedChannel(code, label, pin))
+            }
+            rebuildSavedChannelsList?.invoke()
+        }.apply {
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8)
+                bottomMargin = dp(4)
+            }
+        }
+        cloudSection.addView(btnAddOrUpdateChannel)
+
+        rebuildSavedChannelsList = {
+            savedChannelsListLayout.removeAllViews()
+            val activeCode = MobileConfig.sanitizeChannel(edtChannel.text.toString())
+            for ((index, item) in workingChannels.withIndex()) {
+                val isSelected = item.code.equals(activeCode, ignoreCase = true)
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(11), dp(8), dp(8), dp(8))
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(8).toFloat()
+                        setColor(if (isSelected) ThemeColors.AccentBlueActiveBg else ThemeColors.SubCardBg)
+                        setStroke(dp(1), if (isSelected) ThemeColors.AccentBlue else ThemeColors.Divider)
+                    }
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        if (index > 0) topMargin = dp(5)
+                    }
+                    setOnClickListener {
+                        it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                        edtChannel.setText(item.code)
+                        edtChannelLabel.setText(item.label)
+                        if (item.pin.isNotEmpty() || edtPin.text.isNullOrEmpty()) {
+                            edtPin.setText(item.pin)
+                        }
+                        rebuildSavedChannelsList?.invoke()
+                    }
+                }
+
+                val dot = View(this).apply {
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(if (isSelected) ThemeColors.AccentEmerald else ThemeColors.TextMuted)
+                    }
+                    layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)).apply {
+                        rightMargin = dp(9)
+                    }
+                }
+                row.addView(dot)
+
+                val textCol = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                }
+                val titleStr = if (item.label.isNotBlank()) "${item.label}  •  ${item.code}" else item.code
+                val lblCode = TextView(this).apply {
+                    text = titleStr
+                    setTextColor(if (isSelected) ThemeColors.TextPrimary else ThemeColors.TextSecondary)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    typeface = Typeface.create(
+                        if (item.label.isNotBlank()) "sans-serif-medium" else "monospace",
+                        Typeface.BOLD
+                    )
+                    setSingleLine(true)
+                    ellipsize = TextUtils.TruncateAt.END
+                }
+                textCol.addView(lblCode)
+                row.addView(textCol)
+
+                if (isSelected) {
+                    val activeBadge = TextView(this).apply {
+                        text = "IZBRAN"
+                        setTextColor(ThemeColors.AccentBlue)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                        setPadding(dp(6), dp(2), dp(6), dp(2))
+                        background = GradientDrawable().apply {
+                            cornerRadius = dp(5).toFloat()
+                            setColor(0x2238BDF8.toInt())
+                            setStroke(dp(1), 0x5538BDF8.toInt())
+                        }
+                        layoutParams = LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            rightMargin = if (workingChannels.size > 1) dp(6) else 0
+                        }
+                    }
+                    row.addView(activeBadge)
+                }
+
+                if (workingChannels.size > 1) {
+                    val btnRemove = TextView(this).apply {
+                        text = "✕"
+                        gravity = Gravity.CENTER
+                        setTextColor(ThemeColors.TextMuted)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                        background = GradientDrawable().apply {
+                            cornerRadius = dp(6).toFloat()
+                            setColor(ThemeColors.BtnBg)
+                            setStroke(dp(1), ThemeColors.BtnBorder)
+                        }
+                        layoutParams = LinearLayout.LayoutParams(dp(26), dp(26))
+                        setOnClickListener {
+                            it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                            workingChannels.removeAt(index)
+                            if (isSelected && workingChannels.isNotEmpty()) {
+                                val next = workingChannels.first()
+                                edtChannel.setText(next.code)
+                                edtChannelLabel.setText(next.label)
+                                edtPin.setText(next.pin)
+                            }
+                            rebuildSavedChannelsList?.invoke()
+                        }
+                    }
+                    row.addView(btnRemove)
+                }
+
+                savedChannelsListLayout.addView(row)
+            }
+        }
+        rebuildSavedChannelsList.invoke()
+
+        cloudSection.addView(createSettingsLabel("Strežnik oblačnega mostu (Firebase URL ali ntfy):"))
+        val edtServer = createSettingsInput(config.cloudServer).apply {
+            hint = "https://ime-projekta-default-rtdb.europe-west1.firebasedatabase.app"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+        }
+        cloudSection.addView(edtServer)
+
+        // LAN fields (side by side)
+        val lanRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val lanColZgoraj = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                rightMargin = dp(6)
+            }
+        }
+        lanColZgoraj.addView(createSettingsLabel("IP Zgornja postaja:"))
+        val edtIpZgoraj = createSettingsInput(config.ipZgoraj).apply {
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        }
+        lanColZgoraj.addView(edtIpZgoraj)
+
+        val lanColSpodaj = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        lanColSpodaj.addView(createSettingsLabel("IP Spodnja postaja:"))
+        val edtIpSpodaj = createSettingsInput(config.ipSpodaj).apply {
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        }
+        lanColSpodaj.addView(edtIpSpodaj)
+
+        lanRow.addView(lanColZgoraj)
+        lanRow.addView(lanColSpodaj)
+        lanSection.addView(lanRow)
+
+        val lblLanHint = TextView(this).apply {
+            text = "Neposredna povezava zahteva lokalni Wi-Fi ali VPN dostop do postaj."
+            setTextColor(ThemeColors.TextMuted)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setPadding(0, dp(6), 0, 0)
+        }
+        lanSection.addView(lblLanHint)
+
+        connCard.addView(cloudSection)
+        connCard.addView(lanSection)
+
+        fun updateConnectionModeUi() {
+            styleSegmentTab(btnModeCloud, useCloudMode)
+            styleSegmentTab(btnModeLan, !useCloudMode)
+            cloudSection.visibility = if (useCloudMode) View.VISIBLE else View.GONE
+            lanSection.visibility = if (!useCloudMode) View.VISIBLE else View.GONE
+        }
+        btnModeCloud.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            useCloudMode = true
+            updateConnectionModeUi()
+        }
+        btnModeLan.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            useCloudMode = false
+            updateConnectionModeUi()
+        }
+        updateConnectionModeUi()
+        container.addView(connCard)
+
+        // =========================================================================
+        // 2. TRAJANJE VOŽNJE VZPENJAČE
+        // =========================================================================
+        val rideCard = createSettingsCard()
+        rideCard.addView(createSectionHeader("TRAJANJE VOŽNJE", "Čas vožnje za prikaz položaja kabine na tirih"))
 
         val rideRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(2), 0, dp(6))
+            setPadding(0, dp(6), 0, dp(6))
         }
         val edtRideDuration = createSettingsInput(config.rideDurationSec.toString()).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
             gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(dp(80), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(dp(74), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 rightMargin = dp(8)
             }
         }
         val lblSecUnit = TextView(this).apply {
             text = "sekund"
-            setTextColor(ThemeColors.TextPrimary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextColor(ThemeColors.TextSecondary)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         rideRow.addView(edtRideDuration)
         rideRow.addView(lblSecUnit)
-        container.addView(rideRow)
+        rideCard.addView(rideRow)
 
         val presetRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(4))
         }
         val presets = listOf(60, 75, 90, 105, 120)
-        for (p in presets) {
+        val presetButtons = mutableListOf<Pair<Int, TextView>>()
+
+        fun updatePresetHighlight() {
+            val curVal = edtRideDuration.text.toString().trim().toIntOrNull() ?: -1
+            for ((sec, btn) in presetButtons) {
+                val active = (sec == curVal)
+                btn.background = GradientDrawable().apply {
+                    cornerRadius = dp(7).toFloat()
+                    setColor(if (active) ThemeColors.AccentBlueActiveBg else ThemeColors.BtnBg)
+                    setStroke(dp(1), if (active) ThemeColors.AccentBlue else ThemeColors.BtnBorder)
+                }
+                btn.setTextColor(if (active) ThemeColors.AccentBlue else ThemeColors.TextPrimary)
+            }
+        }
+
+        for ((idx, p) in presets.withIndex()) {
             val btn = createDialogMiniButton("${p}s") {
                 edtRideDuration.setText(p.toString())
+                updatePresetHighlight()
             }.apply {
-                (layoutParams as? LinearLayout.LayoutParams)?.rightMargin = dp(6)
+                gravity = Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    if (idx < presets.size - 1) rightMargin = dp(5)
+                }
             }
+            presetButtons.add(p to btn)
             presetRow.addView(btn)
         }
-        container.addView(presetRow)
+        edtRideDuration.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                updatePresetHighlight()
+            }
+        })
+        updatePresetHighlight()
+        rideCard.addView(presetRow)
+        container.addView(rideCard)
 
-        // Section divider for Obvestilo ob odhodu
-        val sectionDivider = View(this).apply {
-            setBackgroundColor(ThemeColors.Divider)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)).apply {
-                topMargin = dp(12)
-                bottomMargin = dp(10)
+        // =========================================================================
+        // 3. ZVOK IN GLASOVNO OBVESTILO OB ODHODU
+        // =========================================================================
+        val audioCard = createSettingsCard()
+        audioCard.addView(createSectionHeader("ZVOK IN GOVOR", "Zvočna opozorila in glasovno obvestilo ob odhodu"))
+
+        val soundToggleRow = createModernToggleRow(
+            title = "Zvočna opozorila (zvončki)",
+            subtitle = "Piski ob 1 min do odhoda in ob polni kabini",
+            initialChecked = soundOn
+        ) { checked ->
+            soundOn = checked
+        }
+        audioCard.addView(soundToggleRow)
+
+        val voiceDetailsContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (voiceOn) View.VISIBLE else View.GONE
+            setPadding(0, dp(6), 0, 0)
+        }
+
+        val voiceToggleRow = createModernToggleRow(
+            title = "Glasovno obvestilo ob odhodu",
+            subtitle = "Izgovori čas naslednje vožnje ob odhodu",
+            initialChecked = voiceOn
+        ) { checked ->
+            voiceOn = checked
+            voiceDetailsContainer.visibility = if (checked) View.VISIBLE else View.GONE
+        }
+        audioCard.addView(voiceToggleRow)
+
+        voiceDetailsContainer.addView(createSettingsLabel("Govorni pogon (samodejna medsebojna rezerva):"))
+        val engineSegmentRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(9).toFloat()
+                setColor(ThemeColors.SubCardBg)
+                setStroke(dp(1), ThemeColors.Divider)
+            }
+            setPadding(dp(3), dp(3), dp(3), dp(3))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(4)
+                bottomMargin = dp(4)
             }
         }
-        container.addView(sectionDivider)
-
-        val lblVoiceSectionTitle = TextView(this).apply {
-            text = "Glasovno obvestilo ob odhodu"
-            setTextColor(ThemeColors.TextPrimary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        val btnEngineGoogle = TextView(this).apply {
+            text = "Google TTS (SL)"
+            gravity = Gravity.CENTER
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(0, 0, 0, dp(6))
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        container.addView(lblVoiceSectionTitle)
-
-        val chkVoiceEnabled = CheckBox(this).apply {
-            text = "Omogoči glasovno obvestilo ob odhodu vzpenjače"
-            setTextColor(ThemeColors.TextPrimary)
-            isChecked = config.voiceAnnouncementEnabled
+        val btnEngineAndroid = TextView(this).apply {
+            text = "Android TTS"
+            gravity = Gravity.CENTER
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        container.addView(chkVoiceEnabled)
-
-        container.addView(createSettingsLabel("Izbira naravnega slovenskega glasu (Neural TTS):"))
-        val voiceGroup = RadioGroup(this).apply {
-            orientation = LinearLayout.VERTICAL
+        fun updateVoiceEngineUi() {
+            styleSegmentTab(btnEngineGoogle, !isAndroidVoice)
+            styleSegmentTab(btnEngineAndroid, isAndroidVoice)
         }
-        val isMaleVoice = config.voiceAnnouncementVoice.equals(MobileConfig.MALE_NEURAL_VOICE, ignoreCase = true)
-        val rbVoicePetra = RadioButton(this).apply {
-            text = "Petra — naravni ženski glas (sl-SI Neural)"
-            setTextColor(ThemeColors.TextPrimary)
-            isChecked = !isMaleVoice
+        btnEngineGoogle.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            isAndroidVoice = false
+            updateVoiceEngineUi()
         }
-        val rbVoiceRok = RadioButton(this).apply {
-            text = "Rok — naravni moški glas (sl-SI Neural)"
-            setTextColor(ThemeColors.TextPrimary)
-            isChecked = isMaleVoice
+        btnEngineAndroid.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            isAndroidVoice = true
+            updateVoiceEngineUi()
         }
-        voiceGroup.addView(rbVoicePetra)
-        voiceGroup.addView(rbVoiceRok)
-        container.addView(voiceGroup)
+        updateVoiceEngineUi()
+        engineSegmentRow.addView(btnEngineGoogle)
+        engineSegmentRow.addView(btnEngineAndroid)
+        voiceDetailsContainer.addView(engineSegmentRow)
 
         // Gain header row (100 % .. 400 %, step 25 %)
         val gainRow = LinearLayout(this).apply {
@@ -2060,8 +2543,6 @@ class MainActivity : Activity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        val initialStep = ((config.voiceAnnouncementGain.coerceIn(1.0, 4.0) - 1.0) / 0.25).roundToInt().coerceIn(0, 12)
-        var currentGain = 1.0 + initialStep * 0.25
         val lblGainVal = TextView(this).apply {
             text = "${(currentGain * 100.0).roundToInt()} %"
             setTextColor(ThemeColors.AccentEmerald)
@@ -2070,7 +2551,7 @@ class MainActivity : Activity() {
         }
         gainRow.addView(lblGainTitle)
         gainRow.addView(lblGainVal)
-        container.addView(gainRow)
+        voiceDetailsContainer.addView(gainRow)
 
         val seekGain = SeekBar(this).apply {
             max = 12 // 0 -> 100%, 12 -> 400% (25% steps)
@@ -2084,110 +2565,307 @@ class MainActivity : Activity() {
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
             })
         }
-        container.addView(seekGain)
+        voiceDetailsContainer.addView(seekGain)
 
-        container.addView(createSettingsLabel("Besedilo obvestila (uporabite {minute} za interval naslednje vožnje):"))
-        val edtVoiceTemplate = EditText(this).apply {
-            setText(config.voiceAnnouncementTemplate.ifBlank { MobileConfig.DEFAULT_VOICE_TEMPLATE })
-            setTextColor(ThemeColors.TextPrimary)
-            setHintTextColor(ThemeColors.TextMuted)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+        voiceDetailsContainer.addView(createSettingsLabel("Besedilo obvestila ({minute} = interval naslednje vožnje):"))
+        val edtVoiceTemplate = createSettingsInput(
+            config.voiceAnnouncementTemplate.ifBlank { MobileConfig.DEFAULT_VOICE_TEMPLATE },
+            singleLine = false
+        ).apply {
             minLines = 2
             maxLines = 3
         }
-        container.addView(edtVoiceTemplate)
+        voiceDetailsContainer.addView(edtVoiceTemplate)
 
         val lblVoicePreview = TextView(this).apply {
-            text = "Primer izgovora: \"${MobileVoiceAnnouncer.buildAnnouncementText(edtVoiceTemplate.text.toString(), 10)}\""
+            text = "Primer: \"${MobileVoiceAnnouncer.buildAnnouncementText(edtVoiceTemplate.text.toString(), 10)}\""
             setTextColor(ThemeColors.TextMuted)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
-            setPadding(0, dp(4), 0, dp(8))
+            setPadding(dp(2), dp(5), dp(2), dp(8))
         }
         edtVoiceTemplate.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
                 val sample = MobileVoiceAnnouncer.buildAnnouncementText(s?.toString(), 10)
-                lblVoicePreview.text = "Primer izgovora: \"$sample\""
+                lblVoicePreview.text = "Primer: \"$sample\""
             }
         })
-        container.addView(lblVoicePreview)
+        voiceDetailsContainer.addView(lblVoicePreview)
 
         val voiceBtnRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(2), 0, dp(6))
         }
-
         val btnDefaultVoice = createDialogMiniButton("Privzeto besedilo") {
             edtVoiceTemplate.setText(MobileConfig.DEFAULT_VOICE_TEMPLATE)
+        }.apply {
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                rightMargin = dp(6)
+            }
         }
-        val btnTestVoice = createDialogMiniButton("Preizkusi glas") {
-            val selectedVoice = if (rbVoiceRok.isChecked) MobileConfig.MALE_NEURAL_VOICE else MobileConfig.DEFAULT_NEURAL_VOICE
+        val btnTestVoice = createDialogMiniButton("Preizkusi glas", accent = true) {
+            val selectedVoice = if (isAndroidVoice) MobileConfig.ANDROID_TTS_VOICE else MobileConfig.DEFAULT_NEURAL_VOICE
             val sampleText = MobileVoiceAnnouncer.buildAnnouncementText(edtVoiceTemplate.text.toString(), 10)
             MobileVoiceAnnouncer.speakCustomText(sampleText, currentGain, selectedVoice)
         }.apply {
-            (layoutParams as LinearLayout.LayoutParams).leftMargin = dp(8)
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         voiceBtnRow.addView(btnDefaultVoice)
         voiceBtnRow.addView(btnTestVoice)
-        container.addView(voiceBtnRow)
+        voiceDetailsContainer.addView(voiceBtnRow)
+
+        audioCard.addView(voiceDetailsContainer)
+        container.addView(audioCard)
 
         scroll.addView(container)
+        rootDialogLayout.addView(scroll)
 
-        AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Nastavitve")
-            .setView(scroll)
-            .setPositiveButton("Shrani") { _, _ ->
-                config.useCloudRelay = rbCloud.isChecked
-                config.cloudChannelId = MobileConfig.sanitizeChannel(edtChannel.text.toString())
-                config.cloudPin = edtPin.text.toString().trim()
-                config.cloudServer = MobileConfig.normalizeServerUrl(edtServer.text.toString())
-                config.ipZgoraj = edtIpZgoraj.text.toString().trim().ifEmpty { "10.12.220.34" }
-                config.ipSpodaj = edtIpSpodaj.text.toString().trim().ifEmpty { "10.12.220.36" }
-                config.soundEnabled = chkSound.isChecked
-                config.voiceAnnouncementEnabled = chkVoiceEnabled.isChecked
-                config.voiceAnnouncementVoice = if (rbVoiceRok.isChecked) {
-                    MobileConfig.MALE_NEURAL_VOICE
-                } else {
-                    MobileConfig.DEFAULT_NEURAL_VOICE
-                }
-                val tpl = edtVoiceTemplate.text.toString().replace("\r", " ").replace("\n", " ").trim()
-                config.voiceAnnouncementTemplate = tpl.ifEmpty { MobileConfig.DEFAULT_VOICE_TEMPLATE }
-                config.voiceAnnouncementGain = currentGain
+        // Sticky Bottom Action Bar
+        rootDialogLayout.addView(View(this).apply {
+            setBackgroundColor(ThemeColors.Divider)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1))
+        })
 
-                val parsedDuration = edtRideDuration.text.toString().trim().toIntOrNull() ?: 90
-                config.rideDurationSec = parsedDuration.coerceIn(10, 600)
-                StationCardView.rideDurationSec = config.rideDurationSec
-                cardZgoraj.syncSingleFunicularPosition()
-                cardSpodaj.syncSingleFunicularPosition()
-
-                MobileChimePlayer.enabled = config.soundEnabled
-                MobileVoiceAnnouncer.voiceEnabled = config.voiceAnnouncementEnabled
-                MobileVoiceAnnouncer.voiceTemplate = config.voiceAnnouncementTemplate
-                MobileVoiceAnnouncer.voiceGain = config.voiceAnnouncementGain
-                MobileVoiceAnnouncer.neuralVoiceName = config.voiceAnnouncementVoice
-                MobileVoiceAnnouncer.prewarmCommonAnnouncements()
-
-                config.save()
-                restartNetworking()
+        val footerActionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(10), dp(14), dp(12))
+        }
+        val btnCancel = TextView(this).apply {
+            text = "Prekliči"
+            gravity = Gravity.CENTER
+            setTextColor(ThemeColors.TextSecondary)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(9).toFloat()
+                setColor(ThemeColors.BtnBg)
+                setStroke(dp(1), ThemeColors.BtnBorder)
             }
-            .setNegativeButton("Prekliči", null)
-            .show()
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                rightMargin = dp(8)
+            }
+        }
+        val btnSave = TextView(this).apply {
+            text = "Shrani nastavitve"
+            gravity = Gravity.CENTER
+            setTextColor(Color.parseColor("#06131F"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(9).toFloat()
+                setColor(ThemeColors.AccentBlue)
+            }
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.35f)
+        }
+        footerActionRow.addView(btnCancel)
+        footerActionRow.addView(btnSave)
+        rootDialogLayout.addView(footerActionRow)
+
+        val dialog = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setView(rootDialogLayout)
+            .create()
+
+        btnCloseDialog.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            dialog.dismiss()
+        }
+        btnCancel.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            dialog.dismiss()
+        }
+        btnSave.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            val chosenCode = MobileConfig.sanitizeChannel(edtChannel.text.toString())
+            val chosenLabel = edtChannelLabel.text.toString().trim()
+            val chosenPin = edtPin.text.toString().trim()
+
+            config.useCloudRelay = useCloudMode
+            config.cloudChannelId = chosenCode
+            config.cloudPin = chosenPin
+            config.cloudServer = MobileConfig.normalizeServerUrl(edtServer.text.toString())
+            config.savedChannels = workingChannels
+            config.upsertSavedChannel(chosenCode, chosenLabel, chosenPin)
+
+            config.ipZgoraj = edtIpZgoraj.text.toString().trim().ifEmpty { "10.12.220.34" }
+            config.ipSpodaj = edtIpSpodaj.text.toString().trim().ifEmpty { "10.12.220.36" }
+            config.soundEnabled = soundOn
+            config.voiceAnnouncementEnabled = voiceOn
+            config.voiceAnnouncementVoice = if (isAndroidVoice) {
+                MobileConfig.ANDROID_TTS_VOICE
+            } else {
+                MobileConfig.DEFAULT_NEURAL_VOICE
+            }
+            val tpl = edtVoiceTemplate.text.toString().replace("\r", " ").replace("\n", " ").trim()
+            config.voiceAnnouncementTemplate = tpl.ifEmpty { MobileConfig.DEFAULT_VOICE_TEMPLATE }
+            config.voiceAnnouncementGain = currentGain
+
+            val parsedDuration = edtRideDuration.text.toString().trim().toIntOrNull() ?: 90
+            config.rideDurationSec = parsedDuration.coerceIn(10, 600)
+            StationCardView.rideDurationSec = config.rideDurationSec
+            cardZgoraj.syncSingleFunicularPosition()
+            cardSpodaj.syncSingleFunicularPosition()
+
+            MobileChimePlayer.enabled = config.soundEnabled
+            MobileVoiceAnnouncer.voiceEnabled = config.voiceAnnouncementEnabled
+            MobileVoiceAnnouncer.voiceTemplate = config.voiceAnnouncementTemplate
+            MobileVoiceAnnouncer.voiceGain = config.voiceAnnouncementGain
+            MobileVoiceAnnouncer.neuralVoiceName = config.voiceAnnouncementVoice
+            MobileVoiceAnnouncer.prewarmCommonAnnouncements()
+
+            config.save()
+            restartNetworking()
+            dialog.dismiss()
+        }
+
+        dialog.show()
+        dialog.window?.setBackgroundDrawable(GradientDrawable().apply { setColor(Color.TRANSPARENT) })
     }
 
-    private fun createDialogMiniButton(label: String, onClick: () -> Unit): TextView {
+    private fun createSettingsCard(): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(14))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(ThemeColors.CardBg)
+                setStroke(dp(1), ThemeColors.CardBorder)
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(12)
+            }
+        }
+    }
+
+    private fun createSectionHeader(title: String, subtitle: String): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, dp(6))
+            addView(TextView(this@MainActivity).apply {
+                text = title
+                setTextColor(ThemeColors.AccentBlue)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                letterSpacing = 0.06f
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = subtitle
+                setTextColor(ThemeColors.TextMuted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            })
+        }
+    }
+
+    private fun styleSegmentTab(tab: TextView, selected: Boolean) {
+        if (selected) {
+            tab.setTextColor(ThemeColors.TextPrimary)
+            tab.background = GradientDrawable().apply {
+                cornerRadius = dp(7).toFloat()
+                setColor(ThemeColors.AccentBlueActiveBg)
+                setStroke(dp(1), ThemeColors.AccentBlue)
+            }
+        } else {
+            tab.setTextColor(ThemeColors.TextSecondary)
+            tab.background = null
+        }
+    }
+
+    private fun createModernToggleRow(
+        title: String,
+        subtitle: String,
+        initialChecked: Boolean,
+        onChanged: (Boolean) -> Unit
+    ): LinearLayout {
+        var isChecked = initialChecked
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(11), dp(9), dp(11), dp(9))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(9).toFloat()
+                setColor(ThemeColors.SubCardBg)
+                setStroke(dp(1), ThemeColors.Divider)
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(6)
+            }
+        }
+        val textCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                rightMargin = dp(8)
+            }
+        }
+        val lblTitle = TextView(this).apply {
+            text = title
+            setTextColor(ThemeColors.TextPrimary)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        }
+        val lblSub = TextView(this).apply {
+            text = subtitle
+            setTextColor(ThemeColors.TextMuted)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        }
+        textCol.addView(lblTitle)
+        textCol.addView(lblSub)
+
+        val pillStatus = TextView(this).apply {
+            gravity = Gravity.CENTER
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(10), dp(5), dp(10), dp(5))
+        }
+
+        fun updateVisual() {
+            pillStatus.text = if (isChecked) "VKLOP" else "IZKLOP"
+            pillStatus.setTextColor(if (isChecked) ThemeColors.AccentEmerald else ThemeColors.TextMuted)
+            pillStatus.background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(if (isChecked) 0x2210B981.toInt() else ThemeColors.BtnBg)
+                setStroke(dp(1), if (isChecked) ThemeColors.AccentEmerald else ThemeColors.BtnBorder)
+            }
+        }
+        updateVisual()
+
+        row.addView(textCol)
+        row.addView(pillStatus)
+        row.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            isChecked = !isChecked
+            updateVisual()
+            onChanged(isChecked)
+        }
+        return row
+    }
+
+    private fun createDialogMiniButton(
+        label: String,
+        accent: Boolean = false,
+        onClick: () -> Unit
+    ): TextView {
         val bg = GradientDrawable().apply {
-            cornerRadius = dp(6).toFloat()
-            setColor(ThemeColors.BtnBg)
-            setStroke(dp(1), ThemeColors.BtnBorder)
+            cornerRadius = dp(8).toFloat()
+            setColor(if (accent) ThemeColors.AccentBlueActiveBg else ThemeColors.BtnBg)
+            setStroke(dp(1), if (accent) ThemeColors.AccentBlue else ThemeColors.BtnBorder)
         }
         return TextView(this).apply {
             text = label
-            setTextColor(ThemeColors.TextPrimary)
+            setTextColor(if (accent) ThemeColors.AccentBlue else ThemeColors.TextPrimary)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(dp(12), dp(7), dp(12), dp(7))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
             background = bg
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2204,18 +2882,25 @@ class MainActivity : Activity() {
         return TextView(this).apply {
             this.text = text
             setTextColor(ThemeColors.TextSecondary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, dp(10), 0, dp(2))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setPadding(dp(2), dp(8), dp(2), dp(4))
         }
     }
 
-    private fun createSettingsInput(initialValue: String): EditText {
+    private fun createSettingsInput(initialValue: String, singleLine: Boolean = true): EditText {
         return EditText(this).apply {
             setText(initialValue)
             setTextColor(ThemeColors.TextPrimary)
             setHintTextColor(ThemeColors.TextMuted)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            setSingleLine(true)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            setSingleLine(singleLine)
+            setPadding(dp(11), dp(9), dp(11), dp(9))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(8).toFloat()
+                setColor(ThemeColors.SubCardBg)
+                setStroke(dp(1), ThemeColors.BtnBorder)
+            }
         }
     }
 
@@ -2418,8 +3103,6 @@ class VerticalStationPager(
     var onStationChanged: ((Int) -> Unit)? = null
     var onFooterClicked: (() -> Unit)? = null
 
-    private val footerDot: View
-    private val footerStatusText: TextView
     private val footerVersionText: TextView
 
     private val touchSlop: Int = ViewConfiguration.get(context).scaledTouchSlop
@@ -2452,11 +3135,11 @@ class VerticalStationPager(
         cardStage.addView(cardSpodaj)
         addView(cardStage)
 
-        // Footer where the podrsaj row was: connection & system status + version
+        // Footer: version only (right-aligned)
         val footerBar = LinearLayout(context).apply {
             orientation = HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(4), dp(4), dp(4), dp(2))
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            setPadding(dp(4), dp(2), dp(4), dp(4))
             layoutParams = LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -2467,33 +3150,6 @@ class VerticalStationPager(
             }
         }
 
-        val footerLeft = LinearLayout(context).apply {
-            orientation = HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-
-        footerDot = View(context).apply {
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(ThemeColors.AccentCoral)
-            }
-            layoutParams = LayoutParams(dp(6), dp(6)).apply {
-                rightMargin = dp(6)
-            }
-        }
-
-        footerStatusText = TextView(context).apply {
-            text = "Povezovanje..."
-            setTextColor(ThemeColors.TextMuted)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            setSingleLine(true)
-            ellipsize = TextUtils.TruncateAt.END
-        }
-
-        footerLeft.addView(footerDot)
-        footerLeft.addView(footerStatusText)
-
         footerVersionText = TextView(context).apply {
             text = "v1.2.0"
             setTextColor(ThemeColors.TextMuted)
@@ -2501,19 +3157,8 @@ class VerticalStationPager(
             typeface = Typeface.create("sans-serif", Typeface.NORMAL)
         }
 
-        footerBar.addView(footerLeft)
         footerBar.addView(footerVersionText)
         addView(footerBar)
-    }
-
-    fun updateFooterStatus(isConnected: Boolean, modeInfo: String) {
-        (footerDot.background as? GradientDrawable)?.setColor(
-            if (isConnected) ThemeColors.AccentEmerald else ThemeColors.AccentCoral
-        )
-        footerStatusText.text = modeInfo
-        footerStatusText.setTextColor(
-            if (isConnected) ThemeColors.TextSecondary else ThemeColors.AccentCoral
-        )
     }
 
     override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
@@ -3668,13 +4313,9 @@ class FunicularTrackView(
         statusPaint.textSize = labelTextSize
 
         // 1. Top Row: SPODNJA (left) — Single Car Status (center) — ZGORNJA (right)
-        val atSpodnja = isOnline && !isRiding && displayPos <= 0.05f
-        val atZgornja = isOnline && !isRiding && displayPos >= 0.95f
-
         labelPaint.textAlign = Paint.Align.LEFT
         labelPaint.color = when {
             !isOnline -> ThemeColors.TextMuted
-            atSpodnja -> ThemeColors.AccentBlue
             isRiding && !leftToRight -> ThemeColors.AccentBlue
             else -> ThemeColors.TextSecondary
         }
@@ -3683,7 +4324,6 @@ class FunicularTrackView(
         labelPaint.textAlign = Paint.Align.RIGHT
         labelPaint.color = when {
             !isOnline -> ThemeColors.TextMuted
-            atZgornja -> ThemeColors.AccentBlue
             isRiding && leftToRight -> ThemeColors.AccentEmerald
             else -> ThemeColors.TextSecondary
         }
@@ -3727,7 +4367,7 @@ class FunicularTrackView(
             !isOnline -> ThemeColors.TextMuted
             isRiding && leftToRight -> ThemeColors.AccentEmerald
             isRiding && !leftToRight -> ThemeColors.AccentBlue
-            else -> ThemeColors.AccentBlue
+            else -> ThemeColors.TextSecondary
         }
 
         // Active trail along the track behind the funicular car while riding
@@ -3740,10 +4380,10 @@ class FunicularTrackView(
 
         // Left & Right Station Track Buffers / Stops
         val stationNodeR = dpF(3.5f)
-        fillPaint.color = if (atSpodnja || (isRiding && !leftToRight)) activeColor else ThemeColors.BtnBorder
+        fillPaint.color = if (isOnline && isRiding && !leftToRight) activeColor else ThemeColors.BtnBorder
         canvas.drawCircle(trackStartX, railY, stationNodeR, fillPaint)
 
-        fillPaint.color = if (atZgornja || (isRiding && leftToRight)) activeColor else ThemeColors.BtnBorder
+        fillPaint.color = if (isOnline && isRiding && leftToRight) activeColor else ThemeColors.BtnBorder
         canvas.drawCircle(trackEndX, railY, stationNodeR, fillPaint)
 
         // 3. Funicular Car sitting directly on tracks (no top cable attachment)
@@ -3753,7 +4393,7 @@ class FunicularTrackView(
         carRect.set(carX - carHalfW, carTop, carX + carHalfW, carBottom)
 
         // Undercarriage bogie / wheels on the rail
-        fillPaint.color = if (isOnline) activeColor else ThemeColors.TextMuted
+        fillPaint.color = if (isOnline && isRiding) activeColor else ThemeColors.TextMuted
         canvas.drawCircle(carX - carHalfW * 0.54f, railY - wheelR * 0.25f, wheelR, fillPaint)
         canvas.drawCircle(carX + carHalfW * 0.54f, railY - wheelR * 0.25f, wheelR, fillPaint)
 
@@ -3763,7 +4403,7 @@ class FunicularTrackView(
         canvas.drawRoundRect(carRect, cornerR, cornerR, fillPaint)
 
         carStrokePaint.strokeWidth = max(1.6f, dpF(1.5f))
-        carStrokePaint.color = if (isOnline) activeColor else ThemeColors.BtnBorder
+        carStrokePaint.color = if (isOnline && isRiding) activeColor else ThemeColors.TextSecondary
         canvas.drawRoundRect(carRect, cornerR, cornerR, carStrokePaint)
 
         // Two panoramic cabin windows
