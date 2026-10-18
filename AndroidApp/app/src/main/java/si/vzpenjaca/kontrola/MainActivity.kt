@@ -298,6 +298,7 @@ object ThemeColors {
     val AccentBlueActiveBg = Color.parseColor("#162C46")
     val AccentBtnMuted = Color.parseColor("#3E5274")
     val AccentEmerald = Color.parseColor("#10B981")
+    val AccentEmeraldActiveBg = Color.parseColor("#11352F")
     val AccentAmber = Color.parseColor("#F59E0B")
     val AccentAmberBg = Color.parseColor("#2B2111")
     val AccentCoral = Color.parseColor("#EF4444")
@@ -4493,9 +4494,21 @@ class FunicularTrackView(
         val isHeadingToZgornja = isFromSpodnja
         val leftLabelText = if (isZgornjaToSpodnja) "ZGORNJA" else "SPODNJA"
         val rightLabelText = if (isZgornjaToSpodnja) "SPODNJA" else "ZGORNJA"
+        val rideAccentColor = if (!isZgornjaToSpodnja) {
+            ThemeColors.AccentEmerald
+        } else if (isHeadingToZgornja) {
+            ThemeColors.AccentEmerald
+        } else {
+            ThemeColors.AccentBlue
+        }
+        val rideCabinBgColor = if (rideAccentColor == ThemeColors.AccentEmerald) {
+            ThemeColors.AccentEmeraldActiveBg
+        } else {
+            ThemeColors.AccentBlueActiveBg
+        }
 
         val leftActive = isRiding && (if (isZgornjaToSpodnja) isHeadingToZgornja else !isHeadingToZgornja)
-        val leftActiveColor = if (isZgornjaToSpodnja) ThemeColors.AccentEmerald else ThemeColors.AccentBlue
+        val leftActiveColor = if (!isZgornjaToSpodnja) ThemeColors.AccentEmerald else ThemeColors.AccentEmerald
 
         labelPaint.textAlign = Paint.Align.LEFT
         labelPaint.color = when {
@@ -4520,7 +4533,7 @@ class FunicularTrackView(
             val maxSec = totalRideDurationSec.toLong()
             val sec = (rideElapsedMs / 1000L).coerceIn(0L, maxSec)
             val statusStr = if (leftToRight) "▶ ${sec}s / ${maxSec}s" else "◀ ${sec}s / ${maxSec}s"
-            statusPaint.color = if (isHeadingToZgornja) ThemeColors.AccentEmerald else ThemeColors.AccentBlue
+            statusPaint.color = rideAccentColor
             canvas.drawText(statusStr, w * 0.5f, headerBaselineY, statusPaint)
         }
 
@@ -4552,8 +4565,7 @@ class FunicularTrackView(
         val carX = trackStartX + displayPos * (trackEndX - trackStartX)
         val activeColor = when {
             !isOnline -> ThemeColors.TextMuted
-            isRiding && isHeadingToZgornja -> ThemeColors.AccentEmerald
-            isRiding && !isHeadingToZgornja -> ThemeColors.AccentBlue
+            isRiding -> rideAccentColor
             else -> ThemeColors.TextSecondary
         }
 
@@ -4585,7 +4597,7 @@ class FunicularTrackView(
         canvas.drawCircle(carX + carHalfW * 0.54f, railY - wheelR * 0.25f, wheelR, fillPaint)
 
         // Cabin body fill + border
-        fillPaint.color = if (isOnline && isRiding) ThemeColors.AccentBlueActiveBg else ThemeColors.BtnBg
+        fillPaint.color = if (isOnline && isRiding) rideCabinBgColor else ThemeColors.BtnBg
         val cornerR = dpF(3.8f)
         canvas.drawRoundRect(carRect, cornerR, cornerR, fillPaint)
 
