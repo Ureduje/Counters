@@ -67,6 +67,9 @@ namespace VzpenjacaKontrola
         public bool DimSpodaj = false;
         public bool ShowIntervalBgZgoraj = true;
         public bool ShowIntervalBgSpodaj = true;
+        public bool ShowCapacityZgoraj = true;
+        public bool ShowCapacitySpodaj = true;
+        public int CounterViewMode = 0;
         public bool CloudRelayEnabled = true;
         public string CloudRelayServer = "https://vzpenjaca-kontrola-default-rtdb.europe-west1.firebasedatabase.app";
         public string CloudChannelId = "vzpenjaca-3436";
@@ -182,6 +185,20 @@ namespace VzpenjacaKontrola
                         {
                             cfg.ShowIntervalBgSpodaj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
                         }
+                        else if (key.Equals("ShowCapacityZgoraj", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.ShowCapacityZgoraj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
+                        else if (key.Equals("ShowCapacitySpodaj", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.ShowCapacitySpodaj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
+                        else if (key.Equals("CounterViewMode", StringComparison.OrdinalIgnoreCase))
+                        {
+                            int cvm;
+                            if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out cvm) && (cvm == 0 || cvm == 1))
+                                cfg.CounterViewMode = cvm;
+                        }
                         else if (key.Equals("CloudRelayEnabled", StringComparison.OrdinalIgnoreCase))
                         {
                             cfg.CloudRelayEnabled = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
@@ -240,6 +257,9 @@ namespace VzpenjacaKontrola
                 sb.AppendLine("DimSpodaj=" + (DimSpodaj ? "true" : "false"));
                 sb.AppendLine("ShowIntervalBgZgoraj=" + (ShowIntervalBgZgoraj ? "true" : "false"));
                 sb.AppendLine("ShowIntervalBgSpodaj=" + (ShowIntervalBgSpodaj ? "true" : "false"));
+                sb.AppendLine("ShowCapacityZgoraj=" + (ShowCapacityZgoraj ? "true" : "false"));
+                sb.AppendLine("ShowCapacitySpodaj=" + (ShowCapacitySpodaj ? "true" : "false"));
+                sb.AppendLine("CounterViewMode=" + CounterViewMode.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("CloudRelayEnabled=" + (CloudRelayEnabled ? "true" : "false"));
                 sb.AppendLine("CloudRelayServer=" + CloudRelayServer);
                 sb.AppendLine("CloudChannelId=" + CloudChannelId);
@@ -1072,15 +1092,21 @@ namespace VzpenjacaKontrola
         private readonly Border _centerDivider;
         private readonly Grid _personsSection;
 
+        private readonly StackPanel _timeNumberStack;
         private readonly TextBlock _txtTimerValue;
+        private readonly TextBlock _txtTimerIntervalInline;
         private readonly TextBlock _txtSetTimeValue;
         private readonly Grid _bgIntervalGrid;
         private readonly TextBlock _txtBgIntervalValue;
+        private readonly TextBlock _txtUnderIntervalValue;
         private readonly Border _timerProgressFill;
         private readonly Border _timerProgressTrack;
 
+        private readonly StackPanel _personsNumberStack;
         private readonly TextBlock _txtPersonsCurrent;
         private readonly TextBlock _txtPersonsMax;
+        private readonly TextBlock _txtSetCapacityValue;
+        private readonly TextBlock _txtUnderCapacityValue;
         private readonly Border _personsProgressFill;
         private readonly Border _personsProgressTrack;
 
@@ -1103,6 +1129,8 @@ namespace VzpenjacaKontrola
         private bool _isMuted = false;
         private bool _isDimmed = false;
         private bool _showIntervalBg = true;
+        private bool _showCapacityUnder = true;
+        private int _counterViewMode = 0;
 
         public bool IsOnline { get { return _isOnline; } }
         public int CurrentPersons { get { return _currentPersons; } }
@@ -1139,16 +1167,39 @@ namespace VzpenjacaKontrola
             set
             {
                 _showIntervalBg = value;
-                if (_bgIntervalGrid != null)
-                {
-                    _bgIntervalGrid.Visibility = _showIntervalBg ? Visibility.Visible : Visibility.Collapsed;
-                }
+                UpdateCounterViewVisuals();
+            }
+        }
+
+        public bool ShowCapacityUnder
+        {
+            get { return _showCapacityUnder; }
+            set
+            {
+                _showCapacityUnder = value;
+                UpdateCounterViewVisuals();
+            }
+        }
+
+        public int CounterViewMode
+        {
+            get { return _counterViewMode; }
+            set
+            {
+                _counterViewMode = (value == 1) ? 1 : 0;
+                UpdateCounterViewVisuals();
             }
         }
 
         public void ToggleIntervalBackground()
         {
             ShowIntervalBg = !ShowIntervalBg;
+            if (QuickSettingsChanged != null) QuickSettingsChanged();
+        }
+
+        public void ToggleCapacityUnder()
+        {
+            ShowCapacityUnder = !ShowCapacityUnder;
             if (QuickSettingsChanged != null) QuickSettingsChanged();
         }
 
@@ -1170,13 +1221,23 @@ namespace VzpenjacaKontrola
             return tcs.Task;
         }
 
-        public StationCardControl(string stationName, string ipAddress, double initialScale = 1.0, bool initialMuted = false, bool initialDimmed = false, bool initialShowIntervalBg = true)
+        public StationCardControl(
+            string stationName,
+            string ipAddress,
+            double initialScale = 1.0,
+            bool initialMuted = false,
+            bool initialDimmed = false,
+            bool initialShowIntervalBg = true,
+            bool initialShowCapacityUnder = true,
+            int initialCounterViewMode = 0)
         {
             Client = new FunicularClient(ipAddress, 80);
             _currentScale = Math.Max(0.65, Math.Min(1.90, initialScale));
             _isMuted = initialMuted;
             _isDimmed = initialDimmed;
             _showIntervalBg = initialShowIntervalBg;
+            _showCapacityUnder = initialShowCapacityUnder;
+            _counterViewMode = (initialCounterViewMode == 1) ? 1 : 0;
 
             Background = ThemePalette.CardBg;
             BorderBrush = ThemePalette.CardBorder;
@@ -1307,7 +1368,7 @@ namespace VzpenjacaKontrola
             {
                 IsHitTestVisible = false,
                 Opacity = 0.20,
-                Visibility = _showIntervalBg ? Visibility.Visible : Visibility.Collapsed
+                Visibility = (_counterViewMode == 0 && _showIntervalBg) ? Visibility.Visible : Visibility.Collapsed
             };
             _bgIntervalGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(0.1, GridUnitType.Star) });
             _bgIntervalGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(0.8, GridUnitType.Star) });
@@ -1384,6 +1445,20 @@ namespace VzpenjacaKontrola
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(12, 1, 12, 2)
             };
+            StackPanel timeVerticalStack = new StackPanel
+            {
+                Orientation = Orientation.Vertical,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            _timeNumberStack = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
             _txtTimerValue = new TextBlock
             {
                 Text = "--:--",
@@ -1391,10 +1466,43 @@ namespace VzpenjacaKontrola
                 FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
                 FontSize = 46,
                 FontWeight = FontWeights.SemiBold,
-                TextAlignment = TextAlignment.Center
+                TextAlignment = TextAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center
             };
             Typography.SetNumeralAlignment(_txtTimerValue, FontNumeralAlignment.Tabular);
-            timeViewbox.Child = _txtTimerValue;
+
+            _txtTimerIntervalInline = new TextBlock
+            {
+                Text = "/--",
+                Foreground = ThemePalette.TextMuted,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 46,
+                FontWeight = FontWeights.Light,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0),
+                Visibility = (_counterViewMode == 0 && _showIntervalBg) ? Visibility.Visible : Visibility.Collapsed
+            };
+            Typography.SetNumeralAlignment(_txtTimerIntervalInline, FontNumeralAlignment.Tabular);
+
+            _txtUnderIntervalValue = new TextBlock
+            {
+                Text = "--:--",
+                Foreground = ThemePalette.TextMuted,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 46,
+                FontWeight = FontWeights.Normal,
+                Opacity = 0.25,
+                TextAlignment = TextAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Visibility = (_counterViewMode == 1 && _showIntervalBg) ? Visibility.Visible : Visibility.Collapsed
+            };
+            Typography.SetNumeralAlignment(_txtUnderIntervalValue, FontNumeralAlignment.Tabular);
+
+            _timeNumberStack.Children.Add(_txtTimerValue);
+            _timeNumberStack.Children.Add(_txtTimerIntervalInline);
+            timeVerticalStack.Children.Add(_timeNumberStack);
+            timeVerticalStack.Children.Add(_txtUnderIntervalValue);
+            timeViewbox.Child = timeVerticalStack;
             Grid.SetRow(timeViewbox, 1);
 
             _timerProgressTrack = new Border
@@ -1476,6 +1584,7 @@ namespace VzpenjacaKontrola
             personsDisplayGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
             personsDisplayGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
+            Grid personsTopRow = new Grid();
             TextBlock lblPersonsHeader = new TextBlock
             {
                 Text = "ŠTEVILO OSEB",
@@ -1484,7 +1593,36 @@ namespace VzpenjacaKontrola
                 FontSize = 10.5,
                 FontWeight = FontWeights.SemiBold
             };
-            Grid.SetRow(lblPersonsHeader, 0);
+            _txtSetCapacityValue = new TextBlock
+            {
+                Text = "Kapaciteta: --",
+                Foreground = ThemePalette.TextSecondary,
+                FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
+                FontSize = 10.5,
+                FontWeight = FontWeights.SemiBold,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Cursor = Cursors.Hand,
+                ToolTip = (_counterViewMode == 1)
+                    ? "Kliknite za vklop / izklop prikaza kapacitete pod številom oseb"
+                    : "Kliknite za vklop / izklop prikaza kapacitete ob številu oseb",
+                Visibility = Visibility.Visible
+            };
+            _txtSetCapacityValue.MouseLeftButtonDown += (s, e) =>
+            {
+                ToggleCapacityUnder();
+                e.Handled = true;
+            };
+            _txtSetCapacityValue.MouseEnter += (s, e) =>
+            {
+                _txtSetCapacityValue.Foreground = ThemePalette.TextPrimary;
+            };
+            _txtSetCapacityValue.MouseLeave += (s, e) =>
+            {
+                _txtSetCapacityValue.Foreground = ThemePalette.TextSecondary;
+            };
+            personsTopRow.Children.Add(lblPersonsHeader);
+            personsTopRow.Children.Add(_txtSetCapacityValue);
+            Grid.SetRow(personsTopRow, 0);
 
             Viewbox personsViewbox = new Viewbox
             {
@@ -1495,7 +1633,14 @@ namespace VzpenjacaKontrola
                 Margin = new Thickness(0, 1, 0, 2)
             };
 
-            StackPanel personsNumberStack = new StackPanel
+            StackPanel personsVerticalStack = new StackPanel
+            {
+                Orientation = Orientation.Vertical,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            _personsNumberStack = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -1508,24 +1653,43 @@ namespace VzpenjacaKontrola
                 Foreground = ThemePalette.TextPrimary,
                 FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
                 FontSize = 46,
-                FontWeight = FontWeights.SemiBold
+                FontWeight = FontWeights.SemiBold,
+                TextAlignment = TextAlignment.Center
             };
             Typography.SetNumeralAlignment(_txtPersonsCurrent, FontNumeralAlignment.Tabular);
 
             _txtPersonsMax = new TextBlock
             {
-                Text = " / --",
+                Text = "/--",
                 Foreground = ThemePalette.TextMuted,
                 FontFamily = new FontFamily("Segoe UI"),
-                FontSize = 24,
-                VerticalAlignment = VerticalAlignment.Bottom,
-                Margin = new Thickness(2, 0, 0, 5)
+                FontSize = 46,
+                FontWeight = FontWeights.Light,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0),
+                Visibility = (_counterViewMode == 0 && _showCapacityUnder) ? Visibility.Visible : Visibility.Collapsed
             };
             Typography.SetNumeralAlignment(_txtPersonsMax, FontNumeralAlignment.Tabular);
 
-            personsNumberStack.Children.Add(_txtPersonsCurrent);
-            personsNumberStack.Children.Add(_txtPersonsMax);
-            personsViewbox.Child = personsNumberStack;
+            _txtUnderCapacityValue = new TextBlock
+            {
+                Text = "--",
+                Foreground = ThemePalette.TextMuted,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 46,
+                FontWeight = FontWeights.Normal,
+                Opacity = 0.25,
+                TextAlignment = TextAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Visibility = (_counterViewMode == 1 && _showCapacityUnder) ? Visibility.Visible : Visibility.Collapsed
+            };
+            Typography.SetNumeralAlignment(_txtUnderCapacityValue, FontNumeralAlignment.Tabular);
+
+            _personsNumberStack.Children.Add(_txtPersonsCurrent);
+            _personsNumberStack.Children.Add(_txtPersonsMax);
+            personsVerticalStack.Children.Add(_personsNumberStack);
+            personsVerticalStack.Children.Add(_txtUnderCapacityValue);
+            personsViewbox.Child = personsVerticalStack;
             Grid.SetRow(personsViewbox, 1);
 
             _personsProgressTrack = new Border
@@ -1547,7 +1711,7 @@ namespace VzpenjacaKontrola
             _personsProgressTrack.SizeChanged += (s, e) => UpdateProgressBars();
             Grid.SetRow(_personsProgressTrack, 2);
 
-            personsDisplayGrid.Children.Add(lblPersonsHeader);
+            personsDisplayGrid.Children.Add(personsTopRow);
             personsDisplayGrid.Children.Add(personsViewbox);
             personsDisplayGrid.Children.Add(_personsProgressTrack);
             personsDisplayBox.Child = personsDisplayGrid;
@@ -1609,8 +1773,50 @@ namespace VzpenjacaKontrola
             _pollTimer.Tick += async (s, e) => await PollStatusAsync(false);
             _pollTimer.Start();
 
+            UpdateCounterViewVisuals();
             ApplyCounterScale(_currentScale);
             ApplyDimVisuals();
+        }
+
+        private void UpdateCounterViewVisuals()
+        {
+            bool isUnderMode = (_counterViewMode == 1);
+
+            if (_bgIntervalGrid != null)
+            {
+                _bgIntervalGrid.Visibility = Visibility.Collapsed;
+            }
+            if (_txtTimerIntervalInline != null)
+            {
+                _txtTimerIntervalInline.Visibility = (!isUnderMode && _showIntervalBg) ? Visibility.Visible : Visibility.Collapsed;
+            }
+            if (_txtUnderIntervalValue != null)
+            {
+                _txtUnderIntervalValue.Visibility = (isUnderMode && _showIntervalBg) ? Visibility.Visible : Visibility.Collapsed;
+            }
+            if (_txtSetTimeValue != null)
+            {
+                _txtSetTimeValue.ToolTip = isUnderMode
+                    ? "Kliknite za vklop / izklop prikaza intervala pod časom"
+                    : "Kliknite za vklop / izklop prikaza intervala ob času";
+            }
+            if (_txtSetCapacityValue != null)
+            {
+                _txtSetCapacityValue.Visibility = Visibility.Visible;
+                _txtSetCapacityValue.ToolTip = isUnderMode
+                    ? "Kliknite za vklop / izklop prikaza kapacitete pod številom oseb"
+                    : "Kliknite za vklop / izklop prikaza kapacitete ob številu oseb";
+            }
+            if (_txtPersonsMax != null)
+            {
+                _txtPersonsMax.Visibility = (!isUnderMode && _showCapacityUnder) ? Visibility.Visible : Visibility.Collapsed;
+            }
+            if (_txtUnderCapacityValue != null)
+            {
+                _txtUnderCapacityValue.Visibility = (isUnderMode && _showCapacityUnder) ? Visibility.Visible : Visibility.Collapsed;
+            }
+
+            ApplyCounterScale(_currentScale);
         }
 
         private void ApplyDimVisuals()
@@ -1627,9 +1833,43 @@ namespace VzpenjacaKontrola
         public void ApplyCounterScale(double scale)
         {
             _currentScale = Math.Max(0.65, Math.Min(1.90, scale));
-            _txtTimerValue.FontSize = Math.Max(26, Math.Round(46 * _currentScale));
-            _txtPersonsCurrent.FontSize = Math.Max(26, Math.Round(46 * _currentScale));
-            _txtPersonsMax.FontSize = Math.Max(14, Math.Round(24 * _currentScale));
+            double mainFontSize = Math.Max(26, Math.Round(46 * _currentScale));
+            _txtTimerValue.FontSize = mainFontSize;
+            if (_txtTimerIntervalInline != null)
+                _txtTimerIntervalInline.FontSize = mainFontSize;
+            if (_txtUnderIntervalValue != null)
+                _txtUnderIntervalValue.FontSize = mainFontSize;
+            _txtPersonsCurrent.FontSize = mainFontSize;
+            if (_txtUnderCapacityValue != null)
+                _txtUnderCapacityValue.FontSize = mainFontSize;
+            _txtPersonsMax.FontSize = mainFontSize;
+
+            if (_counterViewMode == 1)
+            {
+                double topOuter = -Math.Round(mainFontSize * 0.10);
+                double innerGap = -Math.Round(mainFontSize * 0.15);
+                double botOuter = -Math.Round(mainFontSize * 0.12);
+                if (_timeNumberStack != null)
+                    _timeNumberStack.Margin = new Thickness(0, topOuter, 0, _showIntervalBg ? innerGap : botOuter);
+                if (_txtUnderIntervalValue != null)
+                    _txtUnderIntervalValue.Margin = new Thickness(0, innerGap, 0, botOuter);
+                if (_personsNumberStack != null)
+                    _personsNumberStack.Margin = new Thickness(0, topOuter, 0, _showCapacityUnder ? innerGap : botOuter);
+                if (_txtUnderCapacityValue != null)
+                    _txtUnderCapacityValue.Margin = new Thickness(0, innerGap, 0, botOuter);
+            }
+            else
+            {
+                if (_timeNumberStack != null)
+                    _timeNumberStack.Margin = new Thickness(0);
+                if (_txtUnderIntervalValue != null)
+                    _txtUnderIntervalValue.Margin = new Thickness(0);
+                if (_personsNumberStack != null)
+                    _personsNumberStack.Margin = new Thickness(0);
+                if (_txtUnderCapacityValue != null)
+                    _txtUnderCapacityValue.Margin = new Thickness(0);
+            }
+
             UpdateProgressBars();
         }
 
@@ -1865,11 +2105,25 @@ namespace VzpenjacaKontrola
 
             _txtTimerValue.Text = "--:--";
             _txtTimerValue.Foreground = ThemePalette.TextMuted;
+            if (_txtTimerIntervalInline != null)
+                _txtTimerIntervalInline.Text = "/--";
             if (_txtBgIntervalValue != null)
                 _txtBgIntervalValue.Text = "--:--";
+            if (_txtUnderIntervalValue != null)
+            {
+                _txtUnderIntervalValue.Text = "--:--";
+                _txtUnderIntervalValue.Foreground = ThemePalette.TextMuted;
+            }
             _txtPersonsCurrent.Text = "--";
             _txtPersonsCurrent.Foreground = ThemePalette.TextMuted;
-            _txtPersonsMax.Text = " / --";
+            _txtPersonsMax.Text = "/--";
+            if (_txtSetCapacityValue != null)
+                _txtSetCapacityValue.Text = "Kapaciteta: --";
+            if (_txtUnderCapacityValue != null)
+            {
+                _txtUnderCapacityValue.Text = "--";
+                _txtUnderCapacityValue.Foreground = ThemePalette.TextMuted;
+            }
             _timerProgressFill.Width = 0;
             _personsProgressFill.Width = 0;
 
@@ -1885,10 +2139,18 @@ namespace VzpenjacaKontrola
 
             string formattedTime = FormatMinSec(_remainingMs);
             string formattedInterval = FormatMinSec(_setMs);
+            string formattedIntervalInline = FormatIntervalInline(_setMs);
             _txtTimerValue.Text = formattedTime;
             _txtSetTimeValue.Text = "Interval: " + formattedInterval;
             if (_txtBgIntervalValue != null)
                 _txtBgIntervalValue.Text = formattedInterval;
+            if (_txtTimerIntervalInline != null)
+                _txtTimerIntervalInline.Text = formattedIntervalInline;
+            if (_txtUnderIntervalValue != null)
+            {
+                _txtUnderIntervalValue.Text = formattedInterval;
+                _txtUnderIntervalValue.Foreground = ThemePalette.TextPrimary;
+            }
 
             int timeZone;
             if (_remainingMs <= 0 || formattedTime == "00:00")
@@ -1926,8 +2188,16 @@ namespace VzpenjacaKontrola
         {
             if (!_isOnline) return;
 
+            string formattedMax = _maxPersons.ToString("00", CultureInfo.InvariantCulture);
             _txtPersonsCurrent.Text = _currentPersons.ToString("00", CultureInfo.InvariantCulture);
-            _txtPersonsMax.Text = " / " + _maxPersons.ToString("00", CultureInfo.InvariantCulture);
+            _txtPersonsMax.Text = "/" + formattedMax;
+            if (_txtSetCapacityValue != null)
+                _txtSetCapacityValue.Text = "Kapaciteta: " + formattedMax;
+            if (_txtUnderCapacityValue != null)
+            {
+                _txtUnderCapacityValue.Text = formattedMax;
+                _txtUnderCapacityValue.Foreground = ThemePalette.TextPrimary;
+            }
 
             int personsZone;
             if (_maxPersons > 0 && _currentPersons >= _maxPersons)
@@ -1987,6 +2257,19 @@ namespace VzpenjacaKontrola
             long minutes = totalSeconds / 60;
             long seconds = totalSeconds % 60;
             return string.Format(CultureInfo.InvariantCulture, "{0:00}:{1:00}", minutes, seconds);
+        }
+
+        private static string FormatIntervalInline(long ms)
+        {
+            if (ms < 0) ms = 0;
+            long totalSeconds = (ms + 499) / 1000;
+            long minutes = totalSeconds / 60;
+            long seconds = totalSeconds % 60;
+            if (seconds > 0)
+            {
+                return string.Format(CultureInfo.InvariantCulture, "/{0:00}:{1:00}", minutes, seconds);
+            }
+            return string.Format(CultureInfo.InvariantCulture, "/{0:00}", minutes);
         }
     }
 
@@ -2988,6 +3271,8 @@ namespace VzpenjacaKontrola
         private const int IDM_ZOOM_OUT = 0x1011;
         private const int IDM_ZOOM_RESET = 0x1012;
         private const int IDM_TOGGLE_CONTROLS = 0x1013;
+        private const int IDM_VIEW_CLASSIC = 0x1014;
+        private const int IDM_VIEW_UNDER = 0x1015;
         private const int IDM_EXIT = 0x1019;
         private const int IDM_VERSION = 0x1020;
 
@@ -3065,22 +3350,24 @@ namespace VzpenjacaKontrola
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(10, GridUnitType.Pixel) });
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-            _cardZgoraj = new StationCardControl("ZGORNJA POSTAJA", _config.IpZgoraj, _config.CounterScale, _config.MuteZgoraj, _config.DimZgoraj, _config.ShowIntervalBgZgoraj);
+            _cardZgoraj = new StationCardControl("ZGORNJA POSTAJA", _config.IpZgoraj, _config.CounterScale, _config.MuteZgoraj, _config.DimZgoraj, _config.ShowIntervalBgZgoraj, _config.ShowCapacityZgoraj, _config.CounterViewMode);
             _cardZgoraj.QuickSettingsChanged += () =>
             {
                 _config.MuteZgoraj = _cardZgoraj.IsMuted;
                 _config.DimZgoraj = _cardZgoraj.IsDimmed;
                 _config.ShowIntervalBgZgoraj = _cardZgoraj.ShowIntervalBg;
+                _config.ShowCapacityZgoraj = _cardZgoraj.ShowCapacityUnder;
                 _config.Save();
             };
             Grid.SetRow(_cardZgoraj, 0);
 
-            _cardSpodaj = new StationCardControl("SPODNJA POSTAJA", _config.IpSpodaj, _config.CounterScale, _config.MuteSpodaj, _config.DimSpodaj, _config.ShowIntervalBgSpodaj);
+            _cardSpodaj = new StationCardControl("SPODNJA POSTAJA", _config.IpSpodaj, _config.CounterScale, _config.MuteSpodaj, _config.DimSpodaj, _config.ShowIntervalBgSpodaj, _config.ShowCapacitySpodaj, _config.CounterViewMode);
             _cardSpodaj.QuickSettingsChanged += () =>
             {
                 _config.MuteSpodaj = _cardSpodaj.IsMuted;
                 _config.DimSpodaj = _cardSpodaj.IsDimmed;
                 _config.ShowIntervalBgSpodaj = _cardSpodaj.ShowIntervalBg;
+                _config.ShowCapacitySpodaj = _cardSpodaj.ShowCapacityUnder;
                 _config.Save();
             };
             Grid.SetRow(_cardSpodaj, 2);
@@ -3240,6 +3527,16 @@ namespace VzpenjacaKontrola
             _config.Save();
         }
 
+        public void SetCounterViewMode(int mode)
+        {
+            int normalized = mode == 1 ? 1 : 0;
+            _config.CounterViewMode = normalized;
+            _cardZgoraj.CounterViewMode = normalized;
+            _cardSpodaj.CounterViewMode = normalized;
+            _config.Save();
+            RefreshSystemMenu();
+        }
+
         private void ApplyWindowChrome()
         {
             if (_config.HideWindowControls)
@@ -3311,12 +3608,17 @@ namespace VzpenjacaKontrola
                 uint soundFlag = _config.SoundEnabled ? MF_CHECKED : MF_UNCHECKED;
                 uint voiceFlag = _config.VoiceAnnouncementEnabled ? MF_CHECKED : MF_UNCHECKED;
                 uint cloudFlag = _config.CloudRelayEnabled ? MF_CHECKED : MF_UNCHECKED;
+                uint viewClassicFlag = _config.CounterViewMode == 0 ? MF_CHECKED : MF_UNCHECKED;
+                uint viewUnderFlag = _config.CounterViewMode == 1 ? MF_CHECKED : MF_UNCHECKED;
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | topFlag, (UIntPtr)IDM_ALWAYS_ON_TOP, "Vedno na vrhu");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | autostartFlag, (UIntPtr)IDM_START_WITH_WINDOWS, "Zaženi ob zagonu računalnika");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | soundFlag, (UIntPtr)IDM_SOUND_ENABLED, "Zvočna opozorila");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | voiceFlag, (UIntPtr)IDM_VOICE_ENABLED, "Glasovno obvestilo ob odhodu...");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | cloudFlag, (UIntPtr)IDM_CLOUD_SETTINGS, "Mobilni dostop (Oblak)...");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_TOGGLE_CONTROLS, "Preklopi kontrole okna\t(F11)");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | viewClassicFlag, (UIntPtr)IDM_VIEW_CLASSIC, "Prikaz števcev: Klasični (ob številki)");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | viewUnderFlag, (UIntPtr)IDM_VIEW_UNDER, "Prikaz števcev: Pod številko (spodaj)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_IN, "Povečaj števce\t(Ctrl +)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_OUT, "Pomanjšaj števce\t(Ctrl -)");
@@ -3383,18 +3685,25 @@ namespace VzpenjacaKontrola
 
                 Forms.MenuItem mnuTop = new Forms.MenuItem("Vedno na vrhu", (s, e) => ToggleAlwaysOnTop());
                 Forms.MenuItem mnuSound = new Forms.MenuItem("Zvočna opozorila", (s, e) => ToggleSound());
+                Forms.MenuItem mnuViewClassic = new Forms.MenuItem("Prikaz števcev: Klasični", (s, e) => SetCounterViewMode(0));
+                Forms.MenuItem mnuViewUnder = new Forms.MenuItem("Prikaz števcev: Pod številko", (s, e) => SetCounterViewMode(1));
                 Forms.MenuItem mnuExit = new Forms.MenuItem("Izhod", (s, e) => ExitApplication());
 
                 trayMenu.Popup += (s, e) =>
                 {
                     mnuTop.Checked = Topmost;
                     mnuSound.Checked = _config.SoundEnabled;
+                    mnuViewClassic.Checked = (_config.CounterViewMode == 0);
+                    mnuViewUnder.Checked = (_config.CounterViewMode == 1);
                 };
 
                 trayMenu.MenuItems.Add(mnuOpen);
                 trayMenu.MenuItems.Add("-");
                 trayMenu.MenuItems.Add(mnuTop);
                 trayMenu.MenuItems.Add(mnuSound);
+                trayMenu.MenuItems.Add("-");
+                trayMenu.MenuItems.Add(mnuViewClassic);
+                trayMenu.MenuItems.Add(mnuViewUnder);
                 trayMenu.MenuItems.Add("-");
                 trayMenu.MenuItems.Add(mnuExit);
 
@@ -3569,6 +3878,16 @@ namespace VzpenjacaKontrola
                 else if (cmd == IDM_TOGGLE_CONTROLS)
                 {
                     ToggleWindowControls();
+                    handled = true;
+                }
+                else if (cmd == IDM_VIEW_CLASSIC)
+                {
+                    SetCounterViewMode(0);
+                    handled = true;
+                }
+                else if (cmd == IDM_VIEW_UNDER)
+                {
+                    SetCounterViewMode(1);
                     handled = true;
                 }
                 else if (cmd == IDM_ZOOM_IN)
