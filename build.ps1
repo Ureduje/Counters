@@ -26,7 +26,7 @@ $pc = Join-Path $wpfDir "PresentationCore.dll"
 $wb = Join-Path $wpfDir "WindowsBase.dll"
 $sx = Join-Path $fwDir "System.Xaml.dll"
 
-& $csc /nologo /optimize+ /target:winexe /out:VzpenjacaKontrola.exe /win32icon:app.ico /win32manifest:app.manifest /r:System.dll /r:System.Core.dll /r:$sx /r:$wb /r:$pc /r:$pf Program.cs
+& $csc /nologo /optimize+ /target:winexe /out:VzpenjacaKontrola.exe /win32icon:app.ico /win32manifest:app.manifest /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:$sx /r:$wb /r:$pc /r:$pf Program.cs
 if ($LASTEXITCODE -ne 0) { throw "Napaka pri prevajanju Program.cs" }
 
 Write-Host "3. Prevajanje namestitvenega programa brez skrbniskih pravic (VzpenjacaKontrola-Namestitev.exe)..."

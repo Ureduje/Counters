@@ -1496,6 +1496,7 @@ class MainActivity : Activity() {
 
         cardZgoraj.peerCard = cardSpodaj
         cardSpodaj.peerCard = cardZgoraj
+        cardZgoraj.syncSingleFunicularPosition()
 
         stationPager = VerticalStationPager(this, cardZgoraj, cardSpodaj).apply {
             layoutParams = LinearLayout.LayoutParams(
@@ -3316,7 +3317,7 @@ class VerticalStationPager(
         }
 
         footerVersionText = TextView(context).apply {
-            text = "v1.2.0"
+            text = "v1.2.1"
             setTextColor(ThemeColors.TextMuted)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.create("sans-serif", Typeface.NORMAL)
@@ -3902,7 +3903,10 @@ class StationCardView(
 
         // Real-time Funicular Car Position Animation (90s ride, Spodnja postaja <-> Zgornja postaja)
         // Placed horizontally between time operator buttons and number of persons window
-        funicularTrackView = FunicularTrackView(context = context).apply {
+        funicularTrackView = FunicularTrackView(
+            context = context,
+            isZgornjaToSpodnja = (stationId == "zgoraj")
+        ).apply {
             layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.56f).apply {
                 setMargins(dp(3), dp(5), dp(3), dp(5))
             }
@@ -4243,8 +4247,9 @@ class StationCardView(
         val zSet = zgorajCard?.currentSetMs ?: 0L
 
         if (!sOnline && !zOnline) {
-            spodajCard?.funicularTrackView?.setRideState(false, false, true, lastKnownSingleCarPos, 0L, totalSec)
-            zgorajCard?.funicularTrackView?.setRideState(false, false, true, lastKnownSingleCarPos, 0L, totalSec)
+            val isFromSpodnjaLast = (lastDepartedStationId == "spodaj")
+            spodajCard?.funicularTrackView?.setRideState(false, false, isFromSpodnjaLast, lastKnownSingleCarPos, 0L, totalSec)
+            zgorajCard?.funicularTrackView?.setRideState(false, false, isFromSpodnjaLast, lastKnownSingleCarPos, 0L, totalSec)
             return
         }
 
@@ -4375,11 +4380,13 @@ class StationCardView(
 }
 
 /**
- * Horizontal real-time visualization of the single funicular car on tracks between
- * Spodnja postaja (Left) and Zgornja postaja (Right) over a 90-second ride.
+ * Horizontal real-time visualization of the single funicular car on tracks.
+ * Spodnja postaja view: Spodnja (Left) -> Zgornja (Right).
+ * Zgornja postaja view: Zgornja (Left) -> Spodnja (Right).
  */
 class FunicularTrackView(
-    context: Context
+    context: Context,
+    val isZgornjaToSpodnja: Boolean = false
 ) : View(context) {
 
     private val bgDrawable = GradientDrawable().apply {
@@ -4419,6 +4426,7 @@ class FunicularTrackView(
 
     private var isOnline: Boolean = false
     private var isRiding: Boolean = false
+    private var isFromSpodnja: Boolean = true
     private var leftToRight: Boolean = true
     private var targetPos: Float = 0f
     private var displayPos: Float = 0f
@@ -4433,15 +4441,17 @@ class FunicularTrackView(
     fun setRideState(
         online: Boolean,
         riding: Boolean,
-        leftToRight: Boolean,
-        targetFraction: Float,
+        isFromSpodnja: Boolean,
+        canonicalFraction: Float,
         elapsedMs: Long,
         totalDurationSec: Int = 90
     ) {
-        val clamped = targetFraction.coerceIn(0f, 1f)
+        val viewPos = if (isZgornjaToSpodnja) (1f - canonicalFraction) else canonicalFraction
+        val clamped = viewPos.coerceIn(0f, 1f)
         this.isOnline = online
         this.isRiding = riding
-        this.leftToRight = leftToRight
+        this.isFromSpodnja = isFromSpodnja
+        this.leftToRight = if (isZgornjaToSpodnja) !isFromSpodnja else isFromSpodnja
         this.targetPos = clamped
         this.rideElapsedMs = elapsedMs
         this.totalRideDurationSec = totalDurationSec.coerceAtLeast(10)
@@ -4477,32 +4487,44 @@ class FunicularTrackView(
         labelPaint.textSize = labelTextSize
         statusPaint.textSize = labelTextSize
 
-        // 1. Top Row: SPODNJA (left) — Single Car Status (center) — ZGORNJA (right)
+        // 1. Top Row: Station labels and ride status
+        // Spodnja postaja view: SPODNJA (left) — Single Car Status (center) — ZGORNJA (right)
+        // Zgornja postaja view: ZGORNJA (left) — Single Car Status (center) — SPODNJA (right)
+        val isHeadingToZgornja = isFromSpodnja
+        val leftLabelText = if (isZgornjaToSpodnja) "ZGORNJA" else "SPODNJA"
+        val rightLabelText = if (isZgornjaToSpodnja) "SPODNJA" else "ZGORNJA"
+
+        val leftActive = isRiding && (if (isZgornjaToSpodnja) isHeadingToZgornja else !isHeadingToZgornja)
+        val leftActiveColor = if (isZgornjaToSpodnja) ThemeColors.AccentEmerald else ThemeColors.AccentBlue
+
         labelPaint.textAlign = Paint.Align.LEFT
         labelPaint.color = when {
             !isOnline -> ThemeColors.TextMuted
-            isRiding && !leftToRight -> ThemeColors.AccentBlue
+            leftActive -> leftActiveColor
             else -> ThemeColors.TextSecondary
         }
-        canvas.drawText("SPODNJA", padX, headerBaselineY, labelPaint)
+        canvas.drawText(leftLabelText, padX, headerBaselineY, labelPaint)
+
+        val rightActive = isRiding && (if (isZgornjaToSpodnja) !isHeadingToZgornja else isHeadingToZgornja)
+        val rightActiveColor = if (isZgornjaToSpodnja) ThemeColors.AccentBlue else ThemeColors.AccentEmerald
 
         labelPaint.textAlign = Paint.Align.RIGHT
         labelPaint.color = when {
             !isOnline -> ThemeColors.TextMuted
-            isRiding && leftToRight -> ThemeColors.AccentEmerald
+            rightActive -> rightActiveColor
             else -> ThemeColors.TextSecondary
         }
-        canvas.drawText("ZGORNJA", w - padX, headerBaselineY, labelPaint)
+        canvas.drawText(rightLabelText, w - padX, headerBaselineY, labelPaint)
 
         if (isRiding) {
             val maxSec = totalRideDurationSec.toLong()
             val sec = (rideElapsedMs / 1000L).coerceIn(0L, maxSec)
             val statusStr = if (leftToRight) "▶ ${sec}s / ${maxSec}s" else "◀ ${sec}s / ${maxSec}s"
-            statusPaint.color = if (leftToRight) ThemeColors.AccentEmerald else ThemeColors.AccentBlue
+            statusPaint.color = if (isHeadingToZgornja) ThemeColors.AccentEmerald else ThemeColors.AccentBlue
             canvas.drawText(statusStr, w * 0.5f, headerBaselineY, statusPaint)
         }
 
-        // 2. Horizontal Railway Track (Spodnja postaja on left -> Zgornja postaja on right)
+        // 2. Horizontal Railway Track
         val carHalfW = (h * 0.29f).coerceIn(dpF(12f), dpF(17f))
         val carH = (h * 0.32f).coerceIn(dpF(12f), dpF(17f))
         val trackStartX = padX + carHalfW + dpF(4f)
@@ -4530,8 +4552,8 @@ class FunicularTrackView(
         val carX = trackStartX + displayPos * (trackEndX - trackStartX)
         val activeColor = when {
             !isOnline -> ThemeColors.TextMuted
-            isRiding && leftToRight -> ThemeColors.AccentEmerald
-            isRiding && !leftToRight -> ThemeColors.AccentBlue
+            isRiding && isHeadingToZgornja -> ThemeColors.AccentEmerald
+            isRiding && !isHeadingToZgornja -> ThemeColors.AccentBlue
             else -> ThemeColors.TextSecondary
         }
 

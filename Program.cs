@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -20,13 +20,15 @@ using System.Windows.Shapes;
 using System.Windows.Shell;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using Forms = System.Windows.Forms;
+using Drawing = System.Drawing;
 
 [assembly: AssemblyTitle("Vzpenjača")]
 [assembly: AssemblyDescription("Nadzorna plošča vzpenjače — Zgornja in spodnja postaja")]
 [assembly: AssemblyCompany("Vzpenjača")]
 [assembly: AssemblyProduct("Vzpenjača")]
-[assembly: AssemblyVersion("1.2.0.0")]
-[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyVersion("1.2.1.0")]
+[assembly: AssemblyFileVersion("1.2.1.0")]
 
 namespace VzpenjacaKontrola
 {
@@ -2969,6 +2971,8 @@ namespace VzpenjacaKontrola
     public class MainWindow : Window
     {
         private const int WM_SYSCOMMAND = 0x0112;
+        private const int WM_QUERYENDSESSION = 0x0011;
+        private const int WM_ENDSESSION = 0x0016;
         private const uint MF_STRING = 0x0000;
         private const uint MF_SEPARATOR = 0x0800;
         private const uint MF_CHECKED = 0x0008;
@@ -2984,6 +2988,7 @@ namespace VzpenjacaKontrola
         private const int IDM_ZOOM_OUT = 0x1011;
         private const int IDM_ZOOM_RESET = 0x1012;
         private const int IDM_TOGGLE_CONTROLS = 0x1013;
+        private const int IDM_EXIT = 0x1019;
         private const int IDM_VERSION = 0x1020;
 
         private const int DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19;
@@ -3005,12 +3010,18 @@ namespace VzpenjacaKontrola
         [DllImport("user32.dll")]
         private static extern uint CheckMenuItem(IntPtr hMenu, uint uIDCheckItem, uint uCheck);
 
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
         private readonly AppConfig _config;
         private readonly StationCardControl _cardZgoraj;
         private readonly StationCardControl _cardSpodaj;
         private readonly CloudRelayBridge _cloudBridge;
         private IntPtr _hSysMenu = IntPtr.Zero;
         private bool _isInitialized = false;
+        private Forms.NotifyIcon _trayIcon;
+        private bool _isExplicitExit = false;
+        private bool _hasShownTrayBalloon = false;
 
         public MainWindow()
         {
@@ -3085,10 +3096,35 @@ namespace VzpenjacaKontrola
 
             LocationChanged += (s, e) => SaveWindowBounds();
             SizeChanged += (s, e) => SaveWindowBounds();
+            InitializeTrayIcon();
+
             Closing += (s, e) =>
             {
+                if (!_isExplicitExit)
+                {
+                    e.Cancel = true;
+                    SaveWindowBounds();
+                    Hide();
+                    ShowTrayNotificationOnce();
+                    return;
+                }
+
                 SaveWindowBounds();
                 if (_cloudBridge != null) _cloudBridge.Dispose();
+                DisposeTrayIcon();
+            };
+
+            if (Application.Current != null)
+            {
+                Application.Current.SessionEnding += (s, e) =>
+                {
+                    _isExplicitExit = true;
+                };
+            }
+
+            AppDomain.CurrentDomain.ProcessExit += (s, e) =>
+            {
+                DisposeTrayIcon();
             };
 
             MouseLeftButtonDown += (s, e) =>
@@ -3286,26 +3322,217 @@ namespace VzpenjacaKontrola
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_OUT, "Pomanjšaj števce\t(Ctrl -)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_RESET, "Ponastavi velikost števcev\t(Ctrl 0)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
-                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.2.0");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_EXIT, "Izhod iz programa");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.2.1");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
+            }
+        }
+
+        private void InitializeTrayIcon()
+        {
+            try
+            {
+                _trayIcon = new Forms.NotifyIcon();
+                _trayIcon.Text = "Nadzorna plošča vzpenjače";
+
+                Drawing.Icon appIcon = null;
+                try
+                {
+                    string exe = Process.GetCurrentProcess().MainModule.FileName;
+                    if (File.Exists(exe))
+                    {
+                        appIcon = Drawing.Icon.ExtractAssociatedIcon(exe);
+                    }
+                }
+                catch { }
+
+                if (appIcon == null)
+                {
+                    try
+                    {
+                        string icoPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
+                        if (File.Exists(icoPath))
+                        {
+                            appIcon = new Drawing.Icon(icoPath);
+                        }
+                    }
+                    catch { }
+                }
+
+                if (appIcon == null)
+                {
+                    appIcon = Drawing.SystemIcons.Application;
+                }
+
+                _trayIcon.Icon = appIcon;
+
+                try
+                {
+                    Icon = Imaging.CreateBitmapSourceFromHIcon(
+                        appIcon.Handle,
+                        Int32Rect.Empty,
+                        System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
+                }
+                catch { }
+
+                Forms.ContextMenu trayMenu = new Forms.ContextMenu();
+
+                Forms.MenuItem mnuOpen = new Forms.MenuItem("Prikaži Vzpenjačo", (s, e) => ShowAndRestoreWindow());
+                mnuOpen.DefaultItem = true;
+
+                Forms.MenuItem mnuTop = new Forms.MenuItem("Vedno na vrhu", (s, e) => ToggleAlwaysOnTop());
+                Forms.MenuItem mnuSound = new Forms.MenuItem("Zvočna opozorila", (s, e) => ToggleSound());
+                Forms.MenuItem mnuExit = new Forms.MenuItem("Izhod", (s, e) => ExitApplication());
+
+                trayMenu.Popup += (s, e) =>
+                {
+                    mnuTop.Checked = Topmost;
+                    mnuSound.Checked = _config.SoundEnabled;
+                };
+
+                trayMenu.MenuItems.Add(mnuOpen);
+                trayMenu.MenuItems.Add("-");
+                trayMenu.MenuItems.Add(mnuTop);
+                trayMenu.MenuItems.Add(mnuSound);
+                trayMenu.MenuItems.Add("-");
+                trayMenu.MenuItems.Add(mnuExit);
+
+                _trayIcon.ContextMenu = trayMenu;
+
+                _trayIcon.MouseClick += (s, e) =>
+                {
+                    if (e.Button == Forms.MouseButtons.Left)
+                    {
+                        ShowAndRestoreWindow();
+                    }
+                };
+
+                _trayIcon.DoubleClick += (s, e) =>
+                {
+                    ShowAndRestoreWindow();
+                };
+
+                _trayIcon.BalloonTipClicked += (s, e) =>
+                {
+                    ShowAndRestoreWindow();
+                };
+
+                _trayIcon.Visible = true;
+            }
+            catch { }
+        }
+
+        private void ShowTrayNotificationOnce()
+        {
+            if (!_hasShownTrayBalloon && _trayIcon != null)
+            {
+                _hasShownTrayBalloon = true;
+                try
+                {
+                    _trayIcon.ShowBalloonTip(
+                        3500,
+                        "Vzpenjača",
+                        "Program se še naprej izvaja v ozadju v sistemski vrstici (ob uri).\nZa ponovni prikaz kliknite ikono, za izhod pa z desno tipko miške izberite »Izhod«.",
+                        Forms.ToolTipIcon.Info);
+                }
+                catch { }
+            }
+        }
+
+        private void DisposeTrayIcon()
+        {
+            try
+            {
+                if (_trayIcon != null)
+                {
+                    _trayIcon.Visible = false;
+                    _trayIcon.Dispose();
+                    _trayIcon = null;
+                }
+            }
+            catch { }
+        }
+
+        public void ExitApplication()
+        {
+            _isExplicitExit = true;
+            DisposeTrayIcon();
+            Close();
+            try
+            {
+                Application.Current.Shutdown();
+            }
+            catch { }
+        }
+
+        public void ShowAndRestoreWindow()
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke((Action)ShowAndRestoreWindow);
+                return;
+            }
+
+            if (!IsVisible)
+            {
+                Show();
+            }
+            if (WindowState == WindowState.Minimized)
+            {
+                WindowState = WindowState.Normal;
+            }
+            Activate();
+            Focus();
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero)
+            {
+                SetForegroundWindow(hwnd);
+            }
+        }
+
+        public void ToggleAlwaysOnTop()
+        {
+            Topmost = !Topmost;
+            _config.AlwaysOnTop = Topmost;
+            _config.Save();
+
+            if (_hSysMenu != IntPtr.Zero)
+            {
+                CheckMenuItem(_hSysMenu, IDM_ALWAYS_ON_TOP, MF_BYCOMMAND | (Topmost ? MF_CHECKED : MF_UNCHECKED));
+            }
+        }
+
+        public void ToggleSound()
+        {
+            _config.SoundEnabled = !_config.SoundEnabled;
+            ChimePlayer.Enabled = _config.SoundEnabled;
+            _config.Save();
+
+            if (_hSysMenu != IntPtr.Zero)
+            {
+                CheckMenuItem(_hSysMenu, IDM_SOUND_ENABLED, MF_BYCOMMAND | (_config.SoundEnabled ? MF_CHECKED : MF_UNCHECKED));
+            }
+            if (_config.SoundEnabled)
+            {
+                ChimePlayer.PlayTimeSingle();
             }
         }
 
         private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
+            if (msg == WM_QUERYENDSESSION || msg == WM_ENDSESSION)
+            {
+                _isExplicitExit = true;
+                return new IntPtr(1);
+            }
+
             if (msg == WM_SYSCOMMAND)
             {
                 int cmd = wParam.ToInt32() & 0xFFFF;
                 if (cmd == IDM_ALWAYS_ON_TOP)
                 {
-                    Topmost = !Topmost;
-                    _config.AlwaysOnTop = Topmost;
-                    _config.Save();
-
-                    if (_hSysMenu != IntPtr.Zero)
-                    {
-                        CheckMenuItem(_hSysMenu, IDM_ALWAYS_ON_TOP, MF_BYCOMMAND | (Topmost ? MF_CHECKED : MF_UNCHECKED));
-                    }
+                    ToggleAlwaysOnTop();
                     handled = true;
                 }
                 else if (cmd == IDM_START_WITH_WINDOWS)
@@ -3322,18 +3549,7 @@ namespace VzpenjacaKontrola
                 }
                 else if (cmd == IDM_SOUND_ENABLED)
                 {
-                    _config.SoundEnabled = !_config.SoundEnabled;
-                    ChimePlayer.Enabled = _config.SoundEnabled;
-                    _config.Save();
-
-                    if (_hSysMenu != IntPtr.Zero)
-                    {
-                        CheckMenuItem(_hSysMenu, IDM_SOUND_ENABLED, MF_BYCOMMAND | (_config.SoundEnabled ? MF_CHECKED : MF_UNCHECKED));
-                    }
-                    if (_config.SoundEnabled)
-                    {
-                        ChimePlayer.PlayTimeSingle();
-                    }
+                    ToggleSound();
                     handled = true;
                 }
                 else if (cmd == IDM_VOICE_ENABLED)
@@ -3370,10 +3586,15 @@ namespace VzpenjacaKontrola
                     SetScale(1.0);
                     handled = true;
                 }
+                else if (cmd == IDM_EXIT)
+                {
+                    ExitApplication();
+                    handled = true;
+                }
                 else if (cmd == IDM_VERSION)
                 {
                     MessageBox.Show(
-                        "Nadzorna plošča vzpenjače\nRazličica 1.2.0\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj + "\nMobilni kanal: " + _config.CloudChannelId,
+                        "Nadzorna plošča vzpenjače\nRazličica 1.2.1\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj + "\nMobilni kanal: " + _config.CloudChannelId,
                         "O programu — Vzpenjača",
                         MessageBoxButton.OK,
                         MessageBoxImage.Information);
@@ -3386,11 +3607,53 @@ namespace VzpenjacaKontrola
 
     static class Program
     {
+        private static EventWaitHandle _activateEvent;
+
         [STAThread]
         static void Main()
         {
+            bool createdNew;
+            try
+            {
+                _activateEvent = new EventWaitHandle(false, EventResetMode.AutoReset, "VzpenjacaKontrola_SingleInstance_Signal", out createdNew);
+            }
+            catch
+            {
+                createdNew = true;
+            }
+
+            if (!createdNew)
+            {
+                try
+                {
+                    _activateEvent.Set();
+                }
+                catch { }
+                return;
+            }
+
             Application app = new Application();
-            app.Run(new MainWindow());
+            MainWindow mainWindow = new MainWindow();
+
+            Task.Factory.StartNew(() =>
+            {
+                while (true)
+                {
+                    try
+                    {
+                        if (_activateEvent != null && _activateEvent.WaitOne())
+                        {
+                            mainWindow.ShowAndRestoreWindow();
+                        }
+                    }
+                    catch
+                    {
+                        break;
+                    }
+                }
+            }, TaskCreationOptions.LongRunning);
+
+            app.Run(mainWindow);
         }
     }
 }

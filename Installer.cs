@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -10,8 +10,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Uporabniški namestitveni program (brez skrbniških pravic)")]
 [assembly: AssemblyCompany("Vzpenjača Kontrola")]
 [assembly: AssemblyProduct("Vzpenjača Kontrola")]
-[assembly: AssemblyVersion("1.2.0.0")]
-[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyVersion("1.2.1.0")]
+[assembly: AssemblyFileVersion("1.2.1.0")]
 
 namespace VzpenjacaInstaller
 {
@@ -261,7 +261,11 @@ namespace VzpenjacaInstaller
                 try
                 {
                     proc.CloseMainWindow();
-                    proc.WaitForExit(1000);
+                    if (!proc.WaitForExit(1000))
+                    {
+                        proc.Kill();
+                        proc.WaitForExit(2000);
+                    }
                 }
                 catch { }
             }
@@ -314,7 +318,7 @@ namespace VzpenjacaInstaller
                     if (key != null)
                     {
                         key.SetValue("DisplayName", "Nadzorna plošča vzpenjače");
-                        key.SetValue("DisplayVersion", "1.2.0");
+                        key.SetValue("DisplayVersion", "1.2.1");
                         key.SetValue("Publisher", "Vzpenjača Kontrola");
                         key.SetValue("DisplayIcon", targetExePath);
                         key.SetValue("InstallLocation", targetDir);
@@ -374,7 +378,11 @@ namespace VzpenjacaInstaller
                 try
                 {
                     proc.CloseMainWindow();
-                    proc.WaitForExit(1000);
+                    if (!proc.WaitForExit(1000))
+                    {
+                        proc.Kill();
+                        proc.WaitForExit(2000);
+                    }
                 }
                 catch { }
             }
