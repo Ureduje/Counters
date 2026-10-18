@@ -119,6 +119,7 @@ class MobileConfig(private val context: Context) {
     var showIntervalBgZgoraj: Boolean = true
     var showIntervalBgSpodaj: Boolean = true
     var rideDurationSec: Int = 90
+    var autoLockTimeoutSec: Int = 0 // 0 = unlocked until manually locked; >0 = auto-lock after N seconds
 
     init {
         load()
@@ -157,6 +158,10 @@ class MobileConfig(private val context: Context) {
         if (prefs.contains("showIntervalBgZgoraj")) showIntervalBgZgoraj = prefs.getBoolean("showIntervalBgZgoraj", true)
         if (prefs.contains("showIntervalBgSpodaj")) showIntervalBgSpodaj = prefs.getBoolean("showIntervalBgSpodaj", true)
         if (prefs.contains("rideDurationSec")) rideDurationSec = prefs.getInt("rideDurationSec", 90).coerceIn(10, 600)
+        if (prefs.contains("autoLockTimeoutSec")) {
+            val v = prefs.getInt("autoLockTimeoutSec", 0)
+            autoLockTimeoutSec = if (v in listOf(0, 5, 10, 15, 30, 60)) v else 0
+        }
 
         savedChannels.clear()
         prefs.getString("savedChannelsJson", null)?.takeIf { it.isNotBlank() }?.let { rawJson ->
@@ -227,6 +232,7 @@ class MobileConfig(private val context: Context) {
             .putBoolean("showIntervalBgZgoraj", showIntervalBgZgoraj)
             .putBoolean("showIntervalBgSpodaj", showIntervalBgSpodaj)
             .putInt("rideDurationSec", rideDurationSec.coerceIn(10, 600))
+            .putInt("autoLockTimeoutSec", autoLockTimeoutSec)
             .apply()
     }
 
@@ -1390,6 +1396,36 @@ class MainActivity : Activity() {
         }
     }
 
+    private val autoLockRunnable = Runnable {
+        if (!isControlsLocked) {
+            applyControlsLockState(true)
+        }
+    }
+
+    private fun scheduleAutoLockIfNeeded() {
+        uiHandler.removeCallbacks(autoLockRunnable)
+        if (!isControlsLocked && config.autoLockTimeoutSec > 0) {
+            uiHandler.postDelayed(autoLockRunnable, config.autoLockTimeoutSec * 1000L)
+        }
+    }
+
+    private fun applyControlsLockState(locked: Boolean) {
+        isControlsLocked = locked
+        uiHandler.removeCallbacks(autoLockRunnable)
+        if (::btnLockControls.isInitialized) {
+            btnLockControls.isActive = locked
+        }
+        if (::cardZgoraj.isInitialized) {
+            cardZgoraj.setControlsLocked(locked)
+        }
+        if (::cardSpodaj.isInitialized) {
+            cardSpodaj.setControlsLocked(locked)
+        }
+        if (!locked) {
+            scheduleAutoLockIfNeeded()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -1484,6 +1520,7 @@ class MainActivity : Activity() {
         super.onResume()
         uiHandler.removeCallbacks(tickRunnable)
         uiHandler.post(tickRunnable)
+        scheduleAutoLockIfNeeded()
         restartNetworking()
     }
 
@@ -1491,6 +1528,7 @@ class MainActivity : Activity() {
         super.onPause()
         uiHandler.removeCallbacks(tickRunnable)
         uiHandler.removeCallbacks(lanPollRunnable)
+        uiHandler.removeCallbacks(autoLockRunnable)
         stopCloudStream()
     }
 
@@ -1587,10 +1625,7 @@ class MainActivity : Activity() {
             iconType = TopBarIconButton.IconType.LOCK,
             initialActive = isControlsLocked
         ) {
-            isControlsLocked = !isControlsLocked
-            btnLockControls.isActive = isControlsLocked
-            cardZgoraj.setControlsLocked(isControlsLocked)
-            cardSpodaj.setControlsLocked(isControlsLocked)
+            applyControlsLockState(!isControlsLocked)
         }.apply {
             contentDescription = "Zakleni ali odkleni kontrole"
             layoutParams = LinearLayout.LayoutParams(btnSizeW, btnSizeH)
@@ -1972,6 +2007,8 @@ class MainActivity : Activity() {
         var isAndroidVoice = config.voiceAnnouncementVoice.equals(MobileConfig.ANDROID_TTS_VOICE, ignoreCase = true)
         val initialStep = ((config.voiceAnnouncementGain.coerceIn(1.0, 4.0) - 1.0) / 0.25).roundToInt().coerceIn(0, 12)
         var currentGain = 1.0 + initialStep * 0.25
+        var selectedAutoLockSec = config.autoLockTimeoutSec
+        var lastTimedAutoLockSec = if (selectedAutoLockSec in listOf(5, 10, 15, 30, 60)) selectedAutoLockSec else 15
 
         val workingChannels = config.savedChannels.map { it.copy() }.toMutableList()
         if (workingChannels.none { it.code.equals(config.cloudChannelId, ignoreCase = true) }) {
@@ -2004,7 +2041,7 @@ class MainActivity : Activity() {
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
         }
         val lblDialogSub = TextView(this).apply {
-            text = "Povezava, shranjeni PC-ji, vožnja in zvok"
+            text = "Povezava, odklep kontrol, vožnja in zvok"
             setTextColor(ThemeColors.TextMuted)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
         }
@@ -2376,7 +2413,133 @@ class MainActivity : Activity() {
         container.addView(connCard)
 
         // =========================================================================
-        // 2. TRAJANJE VOŽNJE VZPENJAČE
+        // 2. ODKLEPANJE KONTROL
+        // =========================================================================
+        val lockCard = createSettingsCard()
+        lockCard.addView(
+            createSectionHeader(
+                "ODKLEPANJE KONTROL",
+                "Način zaklepanja tipk po odklepu s ključavnico v glavi"
+            )
+        )
+
+        val lockModeSegmentRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(9).toFloat()
+                setColor(ThemeColors.SubCardBg)
+                setStroke(dp(1), ThemeColors.Divider)
+            }
+            setPadding(dp(3), dp(3), dp(3), dp(3))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(6)
+                bottomMargin = dp(8)
+            }
+        }
+
+        val btnLockManual = TextView(this).apply {
+            text = "Dokler ne zaklenem"
+            gravity = Gravity.CENTER
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val btnLockTimed = TextView(this).apply {
+            text = "Samodejni zaklep"
+            gravity = Gravity.CENTER
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        lockModeSegmentRow.addView(btnLockManual)
+        lockModeSegmentRow.addView(btnLockTimed)
+        lockCard.addView(lockModeSegmentRow)
+
+        val lockPresetsContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        lockPresetsContainer.addView(createSettingsLabel("Samodejno zakleni po preteku:"))
+
+        val lockPresetRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(2)
+            }
+        }
+        val lockPresets = listOf(5, 10, 15, 30, 60)
+        val lockPresetButtons = mutableListOf<Pair<Int, TextView>>()
+
+        val lblLockStatusHint = TextView(this).apply {
+            setTextColor(ThemeColors.TextMuted)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setPadding(0, dp(6), 0, 0)
+        }
+
+        fun updateAutoLockUi() {
+            val isManual = (selectedAutoLockSec == 0)
+            styleSegmentTab(btnLockManual, isManual)
+            styleSegmentTab(btnLockTimed, !isManual)
+            for ((sec, btn) in lockPresetButtons) {
+                val active = (!isManual && selectedAutoLockSec == sec)
+                btn.background = GradientDrawable().apply {
+                    cornerRadius = dp(7).toFloat()
+                    setColor(if (active) ThemeColors.AccentBlueActiveBg else ThemeColors.BtnBg)
+                    setStroke(dp(1), if (active) ThemeColors.AccentBlue else ThemeColors.BtnBorder)
+                }
+                btn.setTextColor(if (active) ThemeColors.AccentBlue else ThemeColors.TextPrimary)
+            }
+            lblLockStatusHint.text = if (isManual) {
+                "Kontrole ostanejo odklenjene, dokler jih ponovno ročno ne zaklenete."
+            } else {
+                "Po odklepu se kontrole čez ${selectedAutoLockSec} s samodejno zaklenejo."
+            }
+        }
+
+        for ((idx, sec) in lockPresets.withIndex()) {
+            val btn = createDialogMiniButton("${sec}s") {
+                selectedAutoLockSec = sec
+                lastTimedAutoLockSec = sec
+                updateAutoLockUi()
+            }.apply {
+                gravity = Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    if (idx < lockPresets.size - 1) rightMargin = dp(5)
+                }
+            }
+            lockPresetButtons.add(sec to btn)
+            lockPresetRow.addView(btn)
+        }
+
+        btnLockManual.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            selectedAutoLockSec = 0
+            updateAutoLockUi()
+        }
+        btnLockTimed.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            if (selectedAutoLockSec == 0) {
+                selectedAutoLockSec = lastTimedAutoLockSec
+            }
+            updateAutoLockUi()
+        }
+
+        lockPresetsContainer.addView(lockPresetRow)
+        lockCard.addView(lockPresetsContainer)
+        lockCard.addView(lblLockStatusHint)
+        updateAutoLockUi()
+        container.addView(lockCard)
+
+        // =========================================================================
+        // 3. TRAJANJE VOŽNJE VZPENJAČE
         // =========================================================================
         val rideCard = createSettingsCard()
         rideCard.addView(createSectionHeader("TRAJANJE VOŽNJE", "Čas vožnje za prikaz položaja kabine na tirih"))
@@ -2707,6 +2870,7 @@ class MainActivity : Activity() {
 
             val parsedDuration = edtRideDuration.text.toString().trim().toIntOrNull() ?: 90
             config.rideDurationSec = parsedDuration.coerceIn(10, 600)
+            config.autoLockTimeoutSec = selectedAutoLockSec
             StationCardView.rideDurationSec = config.rideDurationSec
             cardZgoraj.syncSingleFunicularPosition()
             cardSpodaj.syncSingleFunicularPosition()
@@ -2719,6 +2883,7 @@ class MainActivity : Activity() {
             MobileVoiceAnnouncer.prewarmCommonAnnouncements()
 
             config.save()
+            scheduleAutoLockIfNeeded()
             restartNetworking()
             dialog.dismiss()
         }
