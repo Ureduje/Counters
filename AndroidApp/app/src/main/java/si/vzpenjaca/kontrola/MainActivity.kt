@@ -118,6 +118,8 @@ class MobileConfig(private val context: Context) {
     var dimSpodaj: Boolean = false
     var showIntervalBgZgoraj: Boolean = true
     var showIntervalBgSpodaj: Boolean = true
+    var showCapacityZgoraj: Boolean = true
+    var showCapacitySpodaj: Boolean = true
     var rideDurationSec: Int = 90
     var funicularMotionMode: Int = 1 // 0 = Linear, 1 = Graph-based (acceleration/deceleration)
     var autoLockTimeoutSec: Int = 0 // 0 = unlocked until manually locked; >0 = auto-lock after N seconds
@@ -158,6 +160,8 @@ class MobileConfig(private val context: Context) {
         if (prefs.contains("dimSpodaj")) dimSpodaj = prefs.getBoolean("dimSpodaj", false)
         if (prefs.contains("showIntervalBgZgoraj")) showIntervalBgZgoraj = prefs.getBoolean("showIntervalBgZgoraj", true)
         if (prefs.contains("showIntervalBgSpodaj")) showIntervalBgSpodaj = prefs.getBoolean("showIntervalBgSpodaj", true)
+        if (prefs.contains("showCapacityZgoraj")) showCapacityZgoraj = prefs.getBoolean("showCapacityZgoraj", true)
+        if (prefs.contains("showCapacitySpodaj")) showCapacitySpodaj = prefs.getBoolean("showCapacitySpodaj", true)
         if (prefs.contains("rideDurationSec")) rideDurationSec = prefs.getInt("rideDurationSec", 90).coerceIn(10, 600)
         if (prefs.contains("funicularMotionMode")) {
             val m = prefs.getInt("funicularMotionMode", 1)
@@ -236,6 +240,8 @@ class MobileConfig(private val context: Context) {
             .putBoolean("dimSpodaj", dimSpodaj)
             .putBoolean("showIntervalBgZgoraj", showIntervalBgZgoraj)
             .putBoolean("showIntervalBgSpodaj", showIntervalBgSpodaj)
+            .putBoolean("showCapacityZgoraj", showCapacityZgoraj)
+            .putBoolean("showCapacitySpodaj", showCapacitySpodaj)
             .putInt("rideDurationSec", rideDurationSec.coerceIn(10, 600))
             .putInt("funicularMotionMode", if (funicularMotionMode == 0) 0 else 1)
             .putInt("autoLockTimeoutSec", autoLockTimeoutSec)
@@ -1470,11 +1476,13 @@ class MainActivity : Activity() {
             initialMuted = config.muteZgoraj,
             initialDimmed = config.dimZgoraj,
             initialShowIntervalBg = config.showIntervalBgZgoraj,
+            initialShowCapacity = config.showCapacityZgoraj,
             initialLocked = isControlsLocked,
-            onQuickSettingsChanged = { muted, dimmed, showIntervalBg ->
+            onQuickSettingsChanged = { muted, dimmed, showIntervalBg, showCapacity ->
                 config.muteZgoraj = muted
                 config.dimZgoraj = dimmed
                 config.showIntervalBgZgoraj = showIntervalBg
+                config.showCapacityZgoraj = showCapacity
                 config.save()
             },
             onOperatorCommand = { cmdId ->
@@ -1489,11 +1497,13 @@ class MainActivity : Activity() {
             initialMuted = config.muteSpodaj,
             initialDimmed = config.dimSpodaj,
             initialShowIntervalBg = config.showIntervalBgSpodaj,
+            initialShowCapacity = config.showCapacitySpodaj,
             initialLocked = isControlsLocked,
-            onQuickSettingsChanged = { muted, dimmed, showIntervalBg ->
+            onQuickSettingsChanged = { muted, dimmed, showIntervalBg, showCapacity ->
                 config.muteSpodaj = muted
                 config.dimSpodaj = dimmed
                 config.showIntervalBgSpodaj = showIntervalBg
+                config.showCapacitySpodaj = showCapacity
                 config.save()
             },
             onOperatorCommand = { cmdId ->
@@ -3682,8 +3692,9 @@ class StationCardView(
     initialMuted: Boolean,
     initialDimmed: Boolean,
     initialShowIntervalBg: Boolean,
+    initialShowCapacity: Boolean = true,
     initialLocked: Boolean,
-    private val onQuickSettingsChanged: (muted: Boolean, dimmed: Boolean, showIntervalBg: Boolean) -> Unit,
+    private val onQuickSettingsChanged: (muted: Boolean, dimmed: Boolean, showIntervalBg: Boolean, showCapacity: Boolean) -> Unit,
     private val onOperatorCommand: (Int) -> Unit
 ) : LinearLayout(context) {
 
@@ -3696,15 +3707,20 @@ class StationCardView(
     private val btnDim: HeaderQuickToggleButton
     private val contentContainer: LinearLayout
 
+    private val timeDisplayBox: FrameLayout
+    private val timeNumberRow: LinearLayout
     private val txtTimerValue: TextView
+    private val txtTimerIntervalInline: TextView
     private val txtSetTimeValue: TextView
-    private val txtBgIntervalValue: TextView
     private val timerProgressTrack: FrameLayout
     private val timerProgressFill: View
     private val funicularTrackView: FunicularTrackView
 
+    private val personsDisplayBox: LinearLayout
+    private val personsNumberRow: LinearLayout
     private val txtPersonsCurrent: TextView
     private val txtPersonsMax: TextView
+    private val txtSetCapacityValue: TextView
     private val personsProgressTrack: FrameLayout
     private val personsProgressFill: View
 
@@ -3718,10 +3734,20 @@ class StationCardView(
     private var setMs = 0L
     private var currentPersons = 0
     private var maxPersons = 28
-    private var isMuted = initialMuted
-    private var isDimmed = initialDimmed
-    private var showIntervalBg = initialShowIntervalBg
+    var isMuted = initialMuted
+    var isDimmed = initialDimmed
+    var showIntervalBg = initialShowIntervalBg
+        set(value) {
+            field = value
+            updateCounterViewVisuals()
+        }
+    var showCapacity = initialShowCapacity
+        set(value) {
+            field = value
+            updateCounterViewVisuals()
+        }
     private var controlsLocked = initialLocked
+    private var isViewInitialized = false
     private var lastTimeZone = -1
     private var lastPersonsZone = -1
     private var hasInitialTelemetry = false
@@ -3770,7 +3796,7 @@ class StationCardView(
             if (!isMuted && MobileChimePlayer.enabled) {
                 MobileChimePlayer.playTimeSingle()
             }
-            onQuickSettingsChanged(isMuted, isDimmed, showIntervalBg)
+            onQuickSettingsChanged(isMuted, isDimmed, showIntervalBg, showCapacity)
         }.apply {
             layoutParams = LayoutParams(dp(32), dp(26)).apply {
                 rightMargin = dp(6)
@@ -3784,7 +3810,7 @@ class StationCardView(
         ) { dimmed ->
             isDimmed = dimmed
             applyDimVisuals()
-            onQuickSettingsChanged(isMuted, isDimmed, showIntervalBg)
+            onQuickSettingsChanged(isMuted, isDimmed, showIntervalBg, showCapacity)
         }.apply {
             layoutParams = LayoutParams(dp(32), dp(26)).apply {
                 rightMargin = dp(12)
@@ -3828,7 +3854,7 @@ class StationCardView(
         }
 
         // --- TIME SECTION ---
-        val timeDisplayBox = FrameLayout(context).apply {
+        timeDisplayBox = FrameLayout(context).apply {
             background = GradientDrawable().apply {
                 cornerRadius = dp(9).toFloat()
                 setColor(ThemeColors.SubCardBg)
@@ -3838,24 +3864,6 @@ class StationCardView(
                 bottomMargin = dp(5)
             }
         }
-
-        // Background Interval Watermark (80% width, Opacity 0.20, matching _bgIntervalGrid in PC version)
-        txtBgIntervalValue = TextView(context).apply {
-            text = "--:--"
-            setTextColor(ThemeColors.TextSecondary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 52f)
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            gravity = Gravity.CENTER
-            includeFontPadding = false
-            alpha = 0.20f
-            visibility = if (showIntervalBg) View.VISIBLE else View.GONE
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                Gravity.CENTER
-            )
-        }
-        timeDisplayBox.addView(txtBgIntervalValue)
 
         val timeInnerCol = LinearLayout(context).apply {
             orientation = VERTICAL
@@ -3883,25 +3891,56 @@ class StationCardView(
             setTextColor(ThemeColors.TextSecondary)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(8), dp(2), dp(2), dp(4))
             setOnClickListener {
                 if (controlsLocked) return@setOnClickListener
+                it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
                 showIntervalBg = !showIntervalBg
-                txtBgIntervalValue.visibility = if (showIntervalBg) View.VISIBLE else View.GONE
-                onQuickSettingsChanged(isMuted, isDimmed, showIntervalBg)
+                updateCounterViewVisuals()
+                onQuickSettingsChanged(isMuted, isDimmed, showIntervalBg, showCapacity)
             }
         }
         timeTopRow.addView(lblTimeHeader)
         timeTopRow.addView(txtSetTimeValue)
 
+        val timeCenterContainer = LinearLayout(context).apply {
+            orientation = VERTICAL
+            gravity = Gravity.CENTER
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+
+        val mainCounterTypeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        val inlineCounterTypeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+
+        timeNumberRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+
         txtTimerValue = TextView(context).apply {
             text = "--:--"
             setTextColor(ThemeColors.TextPrimary)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 52f)
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            typeface = mainCounterTypeface
+            fontFeatureSettings = "tnum"
             gravity = Gravity.CENTER
             includeFontPadding = false
-            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
         }
+
+        txtTimerIntervalInline = TextView(context).apply {
+            text = "/--"
+            setTextColor(ThemeColors.TextMuted)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 52f)
+            typeface = inlineCounterTypeface
+            fontFeatureSettings = "tnum"
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+        }
+
+        timeNumberRow.addView(txtTimerValue)
+        timeNumberRow.addView(txtTimerIntervalInline)
+        timeCenterContainer.addView(timeNumberRow)
 
         timerProgressTrack = FrameLayout(context).apply {
             background = GradientDrawable().apply {
@@ -3920,26 +3959,10 @@ class StationCardView(
         timerProgressTrack.addView(timerProgressFill)
         timerProgressTrack.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateProgressBars() }
 
-        timeDisplayBox.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
-            val boxW = v.width
-            val boxH = v.height
-            if (boxW > 0 && boxH > 0) {
-                val targetW = boxW * 0.80f
-                val sample = "00:00"
-                txtBgIntervalValue.paint.textSize = 100f
-                val measured = txtBgIntervalValue.paint.measureText(sample)
-                if (measured > 0f) {
-                    val maxByHeight = boxH * 0.72f
-                    val bgPx = min(100f * (targetW / measured), maxByHeight)
-                    txtBgIntervalValue.setTextSize(TypedValue.COMPLEX_UNIT_PX, bgPx)
-                }
-                val timerPx = (boxH * 0.46f).coerceIn(dp(28).toFloat(), dp(76).toFloat())
-                txtTimerValue.setTextSize(TypedValue.COMPLEX_UNIT_PX, timerPx)
-            }
-        }
+        timeDisplayBox.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> recomputeFontSizes() }
 
         timeInnerCol.addView(timeTopRow)
-        timeInnerCol.addView(txtTimerValue)
+        timeInnerCol.addView(timeCenterContainer)
         timeInnerCol.addView(timerProgressTrack)
         timeDisplayBox.addView(timeInnerCol)
         contentContainer.addView(timeDisplayBox)
@@ -3976,7 +3999,7 @@ class StationCardView(
         contentContainer.addView(funicularTrackView)
 
         // --- PERSONS SECTION ---
-        val personsDisplayBox = LinearLayout(context).apply {
+        personsDisplayBox = LinearLayout(context).apply {
             orientation = VERTICAL
             setPadding(dp(14), dp(8), dp(14), dp(10))
             background = GradientDrawable().apply {
@@ -3989,44 +4012,65 @@ class StationCardView(
             }
         }
 
+        val personsTopRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
         val lblPersonsHeader = TextView(context).apply {
             text = "ŠTEVILO OSEB"
             setTextColor(ThemeColors.TextSecondary)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            layoutParams = LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
+        txtSetCapacityValue = TextView(context).apply {
+            text = "Kapaciteta: --"
+            setTextColor(ThemeColors.TextSecondary)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(8), dp(2), dp(2), dp(4))
+            setOnClickListener {
+                if (controlsLocked) return@setOnClickListener
+                it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                showCapacity = !showCapacity
+                updateCounterViewVisuals()
+                onQuickSettingsChanged(isMuted, isDimmed, showIntervalBg, showCapacity)
+            }
+        }
+        personsTopRow.addView(lblPersonsHeader)
+        personsTopRow.addView(txtSetCapacityValue)
 
-        val personsNumberRow = LinearLayout(context).apply {
-            orientation = HORIZONTAL
+        val personsCenterContainer = LinearLayout(context).apply {
+            orientation = VERTICAL
             gravity = Gravity.CENTER
             layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+
+        personsNumberRow = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
         txtPersonsCurrent = TextView(context).apply {
             text = "--"
             setTextColor(ThemeColors.TextPrimary)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 52f)
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            typeface = mainCounterTypeface
+            fontFeatureSettings = "tnum"
             includeFontPadding = false
         }
         txtPersonsMax = TextView(context).apply {
-            text = " / --"
+            text = "/--"
             setTextColor(ThemeColors.TextMuted)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 52f)
+            typeface = inlineCounterTypeface
+            fontFeatureSettings = "tnum"
             includeFontPadding = false
         }
         personsNumberRow.addView(txtPersonsCurrent)
         personsNumberRow.addView(txtPersonsMax)
-
-        personsDisplayBox.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
-            val boxH = v.height
-            if (boxH > 0) {
-                val mainPx = (boxH * 0.46f).coerceIn(dp(28).toFloat(), dp(76).toFloat())
-                txtPersonsCurrent.setTextSize(TypedValue.COMPLEX_UNIT_PX, mainPx)
-                txtPersonsMax.setTextSize(TypedValue.COMPLEX_UNIT_PX, mainPx * 0.52f)
-            }
-        }
+        personsCenterContainer.addView(personsNumberRow)
 
         personsProgressTrack = FrameLayout(context).apply {
             background = GradientDrawable().apply {
@@ -4045,8 +4089,10 @@ class StationCardView(
         personsProgressTrack.addView(personsProgressFill)
         personsProgressTrack.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateProgressBars() }
 
-        personsDisplayBox.addView(lblPersonsHeader)
-        personsDisplayBox.addView(personsNumberRow)
+        personsDisplayBox.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> recomputeFontSizes() }
+
+        personsDisplayBox.addView(personsTopRow)
+        personsDisplayBox.addView(personsCenterContainer)
         personsDisplayBox.addView(personsProgressTrack)
         contentContainer.addView(personsDisplayBox)
 
@@ -4082,6 +4128,8 @@ class StationCardView(
         contentContainer.addView(personsButtonsRow)
 
         addView(contentContainer)
+        isViewInitialized = true
+        updateCounterViewVisuals()
         applyDimVisuals()
         setControlsLocked(controlsLocked)
     }
@@ -4245,10 +4293,14 @@ class StationCardView(
 
         txtTimerValue.text = "--:--"
         txtTimerValue.setTextColor(ThemeColors.TextMuted)
-        txtBgIntervalValue.text = "--:--"
+        txtTimerIntervalInline.text = "/--"
+        txtSetTimeValue.text = "Interval: --:--"
+
         txtPersonsCurrent.text = "--"
         txtPersonsCurrent.setTextColor(ThemeColors.TextMuted)
-        txtPersonsMax.text = " / --"
+        txtPersonsMax.text = "/--"
+        txtSetCapacityValue.text = "Kapaciteta: --"
+
         setFillWidth(timerProgressFill, 0)
         setFillWidth(personsProgressFill, 0)
         syncSingleFunicularPosition()
@@ -4258,9 +4310,11 @@ class StationCardView(
         if (!isOnline) return
         val formattedTime = formatMinSec(remainingMs)
         val formattedInterval = formatMinSec(setMs)
+        val formattedIntervalInline = formatIntervalInline(setMs)
+
         txtTimerValue.text = formattedTime
         txtSetTimeValue.text = "Interval: $formattedInterval"
-        txtBgIntervalValue.text = formattedInterval
+        txtTimerIntervalInline.text = formattedIntervalInline
 
         val timeZone: Int
         when {
@@ -4413,8 +4467,11 @@ class StationCardView(
 
     private fun renderPersons(suppressChime: Boolean) {
         if (!isOnline) return
-        txtPersonsCurrent.text = String.format(Locale.US, "%02d", currentPersons)
-        txtPersonsMax.text = String.format(Locale.US, " / %02d", maxPersons)
+        val formattedCurrent = String.format(Locale.US, "%02d", currentPersons)
+        val formattedMax = String.format(Locale.US, "%02d", maxPersons)
+        txtPersonsCurrent.text = formattedCurrent
+        txtPersonsMax.text = "/$formattedMax"
+        txtSetCapacityValue.text = "Kapaciteta: $formattedMax"
 
         val personsZone: Int
         when {
@@ -4441,6 +4498,76 @@ class StationCardView(
         }
         lastPersonsZone = personsZone
         updateProgressBars()
+    }
+
+    fun updateCounterViewVisuals() {
+        if (!isViewInitialized) return
+
+        // Time (classical inline view: e.g. 05:23/10)
+        txtTimerIntervalInline.visibility = if (showIntervalBg) View.VISIBLE else View.GONE
+        txtSetTimeValue.alpha = if (showIntervalBg) 1.0f else 0.45f
+
+        // Persons (classical inline view: e.g. 12/28)
+        txtPersonsMax.visibility = if (showCapacity) View.VISIBLE else View.GONE
+        txtSetCapacityValue.alpha = if (showCapacity) 1.0f else 0.45f
+
+        recomputeFontSizes()
+        updateProgressBars()
+    }
+
+    private fun recomputeFontSizes() {
+        if (!isViewInitialized) return
+        val testPaint = Paint().apply {
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            fontFeatureSettings = "tnum"
+            textSize = 100f
+        }
+
+        val timeW = timeDisplayBox.width
+        val timeH = timeDisplayBox.height
+        if (timeW > 0 && timeH > 0) {
+            val availW = (timeW - dp(28)).toFloat().coerceAtLeast(10f)
+            val availH = (timeH - dp(38)).toFloat().coerceAtLeast(10f)
+
+            val sampleText = if (showIntervalBg) {
+                if (setMs > 0L && setMs % 60000L != 0L) "00:00/00:00" else "00:00/00"
+            } else {
+                "00:00"
+            }
+            val measuredW = testPaint.measureText(sampleText)
+            val sizeByW = if (measuredW > 0f) 100f * (availW * 0.94f / measuredW) else 100f
+            val sizeByH = availH * 0.72f
+            val finalPx = min(sizeByW, sizeByH).coerceIn(dp(22).toFloat(), dp(72).toFloat())
+            txtTimerValue.setTextSize(TypedValue.COMPLEX_UNIT_PX, finalPx)
+            txtTimerIntervalInline.setTextSize(TypedValue.COMPLEX_UNIT_PX, finalPx)
+        }
+
+        val persW = personsDisplayBox.width
+        val persH = personsDisplayBox.height
+        if (persW > 0 && persH > 0) {
+            val availW = (persW - dp(28)).toFloat().coerceAtLeast(10f)
+            val availH = (persH - dp(38)).toFloat().coerceAtLeast(10f)
+
+            val sampleText = if (showCapacity) "00/00" else "00"
+            val measuredW = testPaint.measureText(sampleText)
+            val sizeByW = if (measuredW > 0f) 100f * (availW * 0.86f / measuredW) else 100f
+            val sizeByH = availH * 0.72f
+            val finalPx = min(sizeByW, sizeByH).coerceIn(dp(24).toFloat(), dp(72).toFloat())
+            txtPersonsCurrent.setTextSize(TypedValue.COMPLEX_UNIT_PX, finalPx)
+            txtPersonsMax.setTextSize(TypedValue.COMPLEX_UNIT_PX, finalPx)
+        }
+    }
+
+    private fun formatIntervalInline(ms: Long): String {
+        if (ms <= 0L) return "/--"
+        val totalSeconds = (ms + 499L) / 1000L
+        val minutes = totalSeconds / 60L
+        val seconds = totalSeconds % 60L
+        return if (seconds > 0L) {
+            String.format(Locale.US, "/%02d:%02d", minutes, seconds)
+        } else {
+            String.format(Locale.US, "/%02d", minutes)
+        }
     }
 
     private fun updateProgressBars() {
