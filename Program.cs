@@ -70,6 +70,9 @@ namespace VzpenjacaKontrola
         public bool ShowCapacityZgoraj = true;
         public bool ShowCapacitySpodaj = true;
         public int CounterViewMode = 0;
+        public bool ShowFunicularTrack = true;
+        public bool FunicularTrackReversed = false;
+        public int RideDurationSec = 90;
         public bool CloudRelayEnabled = true;
         public string CloudRelayServer = "https://vzpenjaca-kontrola-default-rtdb.europe-west1.firebasedatabase.app";
         public string CloudChannelId = "vzpenjaca-3436";
@@ -199,6 +202,20 @@ namespace VzpenjacaKontrola
                             if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out cvm) && (cvm == 0 || cvm == 1))
                                 cfg.CounterViewMode = cvm;
                         }
+                        else if (key.Equals("ShowFunicularTrack", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.ShowFunicularTrack = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
+                        else if (key.Equals("FunicularTrackReversed", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.FunicularTrackReversed = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
+                        else if (key.Equals("RideDurationSec", StringComparison.OrdinalIgnoreCase))
+                        {
+                            int rds;
+                            if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out rds) && rds >= 10 && rds <= 600)
+                                cfg.RideDurationSec = rds;
+                        }
                         else if (key.Equals("CloudRelayEnabled", StringComparison.OrdinalIgnoreCase))
                         {
                             cfg.CloudRelayEnabled = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
@@ -260,6 +277,9 @@ namespace VzpenjacaKontrola
                 sb.AppendLine("ShowCapacityZgoraj=" + (ShowCapacityZgoraj ? "true" : "false"));
                 sb.AppendLine("ShowCapacitySpodaj=" + (ShowCapacitySpodaj ? "true" : "false"));
                 sb.AppendLine("CounterViewMode=" + CounterViewMode.ToString(CultureInfo.InvariantCulture));
+                sb.AppendLine("ShowFunicularTrack=" + (ShowFunicularTrack ? "true" : "false"));
+                sb.AppendLine("FunicularTrackReversed=" + (FunicularTrackReversed ? "true" : "false"));
+                sb.AppendLine("RideDurationSec=" + RideDurationSec.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("CloudRelayEnabled=" + (CloudRelayEnabled ? "true" : "false"));
                 sb.AppendLine("CloudRelayServer=" + CloudRelayServer);
                 sb.AppendLine("CloudChannelId=" + CloudChannelId);
@@ -1072,6 +1092,345 @@ namespace VzpenjacaKontrola
     }
 
     /// <summary>
+    /// Horizontal real-time visualization of the single funicular car on tracks,
+    /// ported from Android's FunicularTrackView and placed between Zgornja and Spodnja station cards.
+    /// </summary>
+    public class FunicularTrackControl : FrameworkElement
+    {
+        private static readonly Pen BorderPen = CreateFrozenPen(ThemePalette.CardBorder, 1.0, PenLineCap.Flat, PenLineJoin.Miter);
+        private static readonly Pen SleeperPen = CreateFrozenPen(ThemePalette.Divider, 1.3, PenLineCap.Round, PenLineJoin.Round);
+        private static readonly Pen RailPen = CreateFrozenPen(ThemePalette.BtnBorder, 2.2, PenLineCap.Round, PenLineJoin.Round);
+        private static readonly Pen ActiveTrailEmeraldPen = CreateFrozenPen(ThemePalette.AccentEmerald, 2.4, PenLineCap.Round, PenLineJoin.Round);
+        private static readonly Pen ActiveTrailBluePen = CreateFrozenPen(ThemePalette.AccentBlue, 2.4, PenLineCap.Round, PenLineJoin.Round);
+        private static readonly Pen CarStrokeEmeraldPen = CreateFrozenPen(ThemePalette.AccentEmerald, 1.5, PenLineCap.Round, PenLineJoin.Round);
+        private static readonly Pen CarStrokeBluePen = CreateFrozenPen(ThemePalette.AccentBlue, 1.5, PenLineCap.Round, PenLineJoin.Round);
+        private static readonly Pen CarStrokeIdlePen = CreateFrozenPen(ThemePalette.TextSecondary, 1.5, PenLineCap.Round, PenLineJoin.Round);
+
+        private static readonly SolidColorBrush WinOnlineRidingBrush = CreateAlphaBrush("#F8FAFC", 225);
+        private static readonly SolidColorBrush WinOnlineDockedBrush = CreateAlphaBrush("#F8FAFC", 150);
+        private static readonly SolidColorBrush WinOfflineBrush = CreateAlphaBrush("#64748B", 150);
+
+        private static readonly Typeface LabelTypeface = new Typeface(
+            new FontFamily("Segoe UI Semibold, Segoe UI"),
+            FontStyles.Normal,
+            FontWeights.SemiBold,
+            FontStretches.Normal);
+
+        private static readonly Typeface StatusTypeface = new Typeface(
+            new FontFamily("Consolas, Segoe UI Semibold, Segoe UI"),
+            FontStyles.Normal,
+            FontWeights.Bold,
+            FontStretches.Normal);
+
+        private readonly DispatcherTimer _animTimer;
+
+        private bool _isZgornjaToSpodnja = false;
+        private bool _isOnline = false;
+        private bool _isRiding = false;
+        private bool _isFromSpodnja = true;
+        private bool _leftToRight = true;
+        private double _targetPos = 0.0;
+        private double _displayPos = 0.0;
+        private long _rideElapsedMs = 0L;
+        private int _totalRideDurationSec = 90;
+        private bool _hasInitializedPos = false;
+
+        public event Action DirectionToggled;
+
+        public bool IsZgornjaToSpodnja
+        {
+            get { return _isZgornjaToSpodnja; }
+            set
+            {
+                if (_isZgornjaToSpodnja != value)
+                {
+                    _isZgornjaToSpodnja = value;
+                    _targetPos = 1.0 - _targetPos;
+                    _displayPos = 1.0 - _displayPos;
+                    _leftToRight = _isZgornjaToSpodnja ? !_isFromSpodnja : _isFromSpodnja;
+                    InvalidateVisual();
+                }
+            }
+        }
+
+        public FunicularTrackControl(bool initialZgornjaToSpodnja = false)
+        {
+            _isZgornjaToSpodnja = initialZgornjaToSpodnja;
+            SnapsToDevicePixels = true;
+            UseLayoutRounding = true;
+            Cursor = Cursors.Hand;
+            ToolTip = "Položaj vzpenjače v realnem času (kliknite za menjavo smeri Spodnja ↔ Zgornja)";
+
+            _animTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(33) };
+            _animTimer.Tick += (s, e) =>
+            {
+                if (_isRiding && Math.Abs(_targetPos - _displayPos) > 0.0004)
+                {
+                    _displayPos += (_targetPos - _displayPos) * 0.25;
+                    if (Math.Abs(_targetPos - _displayPos) <= 0.0004)
+                    {
+                        _displayPos = _targetPos;
+                        _animTimer.Stop();
+                    }
+                    InvalidateVisual();
+                }
+                else
+                {
+                    _displayPos = _targetPos;
+                    _animTimer.Stop();
+                    InvalidateVisual();
+                }
+            };
+
+            MouseLeftButtonUp += (s, e) =>
+            {
+                IsZgornjaToSpodnja = !IsZgornjaToSpodnja;
+                if (DirectionToggled != null) DirectionToggled();
+                e.Handled = true;
+            };
+        }
+
+        public void SetRideState(
+            bool online,
+            bool riding,
+            bool isFromSpodnja,
+            double canonicalFraction,
+            long elapsedMs,
+            int totalDurationSec = 90)
+        {
+            double viewPos = _isZgornjaToSpodnja ? (1.0 - canonicalFraction) : canonicalFraction;
+            double clamped = Math.Max(0.0, Math.Min(1.0, viewPos));
+            _isOnline = online;
+            _isRiding = riding;
+            _isFromSpodnja = isFromSpodnja;
+            _leftToRight = _isZgornjaToSpodnja ? !isFromSpodnja : isFromSpodnja;
+            _targetPos = clamped;
+            _rideElapsedMs = elapsedMs;
+            _totalRideDurationSec = Math.Max(10, totalDurationSec);
+
+            if (!_hasInitializedPos || !riding || Math.Abs(clamped - _displayPos) > 0.15)
+            {
+                _displayPos = clamped;
+                _hasInitializedPos = true;
+            }
+
+            if (_isRiding && Math.Abs(_targetPos - _displayPos) > 0.0004)
+            {
+                if (!_animTimer.IsEnabled)
+                    _animTimer.Start();
+            }
+            else
+            {
+                _displayPos = _targetPos;
+                if (_animTimer.IsEnabled)
+                    _animTimer.Stop();
+            }
+
+            InvalidateVisual();
+        }
+
+        protected override void OnRender(DrawingContext dc)
+        {
+            base.OnRender(dc);
+            double w = ActualWidth;
+            double h = ActualHeight;
+            if (w <= 2.0 || h <= 2.0) return;
+
+            Rect cardBounds = new Rect(0.5, 0.5, w - 1.0, h - 1.0);
+            dc.DrawRoundedRectangle(ThemePalette.CardBg, BorderPen, cardBounds, 8.0, 8.0);
+
+            double padX = 14.0;
+            double headerBaselineY = h * 0.33;
+            double labelFontSize = Math.Max(9.5, Math.Min(11.5, h * 0.22));
+
+            bool isHeadingToZgornja = _isFromSpodnja;
+            string leftLabelText = _isZgornjaToSpodnja ? "ZGORNJA" : "SPODNJA";
+            string rightLabelText = _isZgornjaToSpodnja ? "SPODNJA" : "ZGORNJA";
+
+            bool leftActive = _isRiding && (_isZgornjaToSpodnja ? isHeadingToZgornja : !isHeadingToZgornja);
+            Brush leftActiveBrush = _isZgornjaToSpodnja ? ThemePalette.AccentEmerald : ThemePalette.AccentBlue;
+            Brush leftBrush = !_isOnline
+                ? ThemePalette.TextMuted
+                : (leftActive ? leftActiveBrush : ThemePalette.TextSecondary);
+
+            FormattedText ftLeft = CreateFormattedText(leftLabelText, LabelTypeface, labelFontSize, leftBrush);
+            dc.DrawText(ftLeft, new Point(padX, headerBaselineY - ftLeft.Baseline));
+
+            bool rightActive = _isRiding && (_isZgornjaToSpodnja ? !isHeadingToZgornja : isHeadingToZgornja);
+            Brush rightActiveBrush = _isZgornjaToSpodnja ? ThemePalette.AccentBlue : ThemePalette.AccentEmerald;
+            Brush rightBrush = !_isOnline
+                ? ThemePalette.TextMuted
+                : (rightActive ? rightActiveBrush : ThemePalette.TextSecondary);
+
+            FormattedText ftRight = CreateFormattedText(rightLabelText, LabelTypeface, labelFontSize, rightBrush);
+            dc.DrawText(ftRight, new Point(w - padX - ftRight.Width, headerBaselineY - ftRight.Baseline));
+
+            if (_isRiding)
+            {
+                long maxSec = _totalRideDurationSec;
+                long sec = Math.Max(0L, Math.Min(maxSec, _rideElapsedMs / 1000L));
+                string statusStr = (_leftToRight ? "▶ " : "◀ ") +
+                                   sec.ToString(CultureInfo.InvariantCulture) + "s / " +
+                                   maxSec.ToString(CultureInfo.InvariantCulture) + "s";
+                Brush statusBrush = isHeadingToZgornja ? ThemePalette.AccentEmerald : ThemePalette.AccentBlue;
+                FormattedText ftStatus = CreateFormattedText(statusStr, StatusTypeface, labelFontSize, statusBrush);
+                dc.DrawText(ftStatus, new Point((w - ftStatus.Width) * 0.5, headerBaselineY - ftStatus.Baseline));
+            }
+
+            // 2. Horizontal Railway Track
+            double carHalfW = Math.Max(12.0, Math.Min(17.0, h * 0.29));
+            double carH = Math.Max(12.0, Math.Min(17.0, h * 0.32));
+            double trackStartX = padX + carHalfW + 4.0;
+            double trackEndX = w - padX - carHalfW - 4.0;
+            if (trackEndX <= trackStartX) return;
+
+            double railY = h * 0.84;
+
+            // Track sleepers / crossties underneath the rail
+            double sleeperTop = railY - 1.5;
+            double sleeperBot = railY + 3.5;
+            int numSleepers = Math.Max(18, Math.Min(36, (int)Math.Round((trackEndX - trackStartX) / 20.0)));
+            for (int i = 0; i <= numSleepers; i++)
+            {
+                double tx = trackStartX + (trackEndX - trackStartX) * ((double)i / (double)numSleepers);
+                dc.DrawLine(SleeperPen, new Point(tx, sleeperTop), new Point(tx, sleeperBot));
+            }
+
+            // Main steel rail line
+            dc.DrawLine(RailPen, new Point(trackStartX, railY), new Point(trackEndX, railY));
+
+            double carX = trackStartX + _displayPos * (trackEndX - trackStartX);
+            Brush activeBrush;
+            Pen activeTrailPen;
+            Pen activeCarPen;
+            if (!_isOnline)
+            {
+                activeBrush = ThemePalette.TextMuted;
+                activeTrailPen = RailPen;
+                activeCarPen = CarStrokeIdlePen;
+            }
+            else if (_isRiding && isHeadingToZgornja)
+            {
+                activeBrush = ThemePalette.AccentEmerald;
+                activeTrailPen = ActiveTrailEmeraldPen;
+                activeCarPen = CarStrokeEmeraldPen;
+            }
+            else if (_isRiding && !isHeadingToZgornja)
+            {
+                activeBrush = ThemePalette.AccentBlue;
+                activeTrailPen = ActiveTrailBluePen;
+                activeCarPen = CarStrokeBluePen;
+            }
+            else
+            {
+                activeBrush = ThemePalette.TextSecondary;
+                activeTrailPen = RailPen;
+                activeCarPen = CarStrokeIdlePen;
+            }
+
+            // Active trail along the track behind the funicular car while riding
+            if (_isOnline && _isRiding)
+            {
+                double originX = _leftToRight ? trackStartX : trackEndX;
+                dc.DrawLine(activeTrailPen, new Point(originX, railY), new Point(carX, railY));
+            }
+
+            // Left & Right Station Track Buffers / Stops
+            double stationNodeR = 3.5;
+            Brush leftNodeBrush = (_isOnline && _isRiding && !_leftToRight) ? activeBrush : ThemePalette.BtnBorder;
+            dc.DrawEllipse(leftNodeBrush, null, new Point(trackStartX, railY), stationNodeR, stationNodeR);
+
+            Brush rightNodeBrush = (_isOnline && _isRiding && _leftToRight) ? activeBrush : ThemePalette.BtnBorder;
+            dc.DrawEllipse(rightNodeBrush, null, new Point(trackEndX, railY), stationNodeR, stationNodeR);
+
+            // 3. Funicular Car sitting directly on tracks
+            double wheelR = 2.1;
+            double carBottom = railY - wheelR * 0.85;
+            double carTop = carBottom - carH;
+            Rect carRect = new Rect(carX - carHalfW, carTop, carHalfW * 2.0, carH);
+
+            // Undercarriage bogie / wheels on the rail
+            Brush wheelBrush = (_isOnline && _isRiding) ? activeBrush : ThemePalette.TextMuted;
+            dc.DrawEllipse(wheelBrush, null, new Point(carX - carHalfW * 0.54, railY - wheelR * 0.25), wheelR, wheelR);
+            dc.DrawEllipse(wheelBrush, null, new Point(carX + carHalfW * 0.54, railY - wheelR * 0.25), wheelR, wheelR);
+
+            // Cabin body fill + border
+            Brush cabinFill = (_isOnline && _isRiding) ? ThemePalette.AccentBlueActiveBg : ThemePalette.BtnBg;
+            Pen cabinStroke = (_isOnline && _isRiding) ? activeCarPen : CarStrokeIdlePen;
+            dc.DrawRoundedRectangle(cabinFill, cabinStroke, carRect, 3.8, 3.8);
+
+            // Two panoramic cabin windows
+            double winMarginX = carHalfW * 0.22;
+            double winGap = carHalfW * 0.14;
+            double winTop = carTop + (carBottom - carTop) * 0.22;
+            double winBottom = carTop + (carBottom - carTop) * 0.64;
+            double winW = Math.Max(1.0, carHalfW - winMarginX - winGap * 0.5);
+            double winH = Math.Max(1.0, winBottom - winTop);
+            Rect winRect1 = new Rect(carX - carHalfW + winMarginX, winTop, winW, winH);
+            Rect winRect2 = new Rect(carX + winGap * 0.5, winTop, winW, winH);
+            Brush winBrush = !_isOnline
+                ? WinOfflineBrush
+                : (_isRiding ? WinOnlineRidingBrush : WinOnlineDockedBrush);
+            dc.DrawRoundedRectangle(winBrush, null, winRect1, 1.5, 1.5);
+            dc.DrawRoundedRectangle(winBrush, null, winRect2, 1.5, 1.5);
+
+            // Direction chevron in front of the cabin when moving
+            if (_isOnline && _isRiding)
+            {
+                double dir = _leftToRight ? 1.0 : -1.0;
+                double arrowBaseX = carX + dir * (carHalfW + 5.0);
+                double arrowTipX = arrowBaseX + dir * 4.2;
+                double arrowMidY = (carTop + carBottom) * 0.5;
+                double arrowHalfH = 3.5;
+                if (arrowTipX >= trackStartX + 2.0 && arrowTipX <= trackEndX - 2.0)
+                {
+                    StreamGeometry arrowGeom = new StreamGeometry();
+                    using (StreamGeometryContext ctx = arrowGeom.Open())
+                    {
+                        ctx.BeginFigure(new Point(arrowBaseX, arrowMidY - arrowHalfH), false, false);
+                        ctx.LineTo(new Point(arrowTipX, arrowMidY), true, false);
+                        ctx.LineTo(new Point(arrowBaseX, arrowMidY + arrowHalfH), true, false);
+                    }
+                    arrowGeom.Freeze();
+                    dc.DrawGeometry(null, activeCarPen, arrowGeom);
+                }
+            }
+        }
+
+        private static FormattedText CreateFormattedText(string text, Typeface typeface, double fontSize, Brush brush)
+        {
+            return new FormattedText(
+                text,
+                CultureInfo.InvariantCulture,
+                FlowDirection.LeftToRight,
+                typeface,
+                fontSize,
+                brush);
+        }
+
+        private static Pen CreateFrozenPen(Brush brush, double thickness, PenLineCap cap, PenLineJoin join)
+        {
+            Pen p = new Pen(brush, thickness)
+            {
+                StartLineCap = cap,
+                EndLineCap = cap,
+                LineJoin = join
+            };
+            p.Freeze();
+            return p;
+        }
+
+        private static SolidColorBrush CreateAlphaBrush(string hex, byte alpha)
+        {
+            Color baseColor = (Color)ColorConverter.ConvertFromString(hex);
+            Color c = Color.FromArgb(alpha, baseColor.R, baseColor.G, baseColor.B);
+            SolidColorBrush b = new SolidColorBrush(c);
+            b.Freeze();
+            return b;
+        }
+    }
+
+    /// <summary>
     /// Station card that dynamically adapts between side-by-side and stacked layouts when the window is narrowed.
     /// </summary>
     public class StationCardControl : Border
@@ -1079,6 +1438,8 @@ namespace VzpenjacaKontrola
         public FunicularClient Client { get; private set; }
         public event Action QuickSettingsChanged;
         public event Action<bool> TelemetryUpdated;
+        public event Action StateTicked;
+        public event Action DepartureDetected;
 
         private readonly TextBlock _lblStation;
         private readonly StackPanel _statusPanel;
@@ -1131,12 +1492,26 @@ namespace VzpenjacaKontrola
         private bool _showIntervalBg = true;
         private bool _showCapacityUnder = true;
         private int _counterViewMode = 0;
+        private double _extraVerticalHeightReduction = 0.0;
 
         public bool IsOnline { get { return _isOnline; } }
         public int CurrentPersons { get { return _currentPersons; } }
         public int MaxPersons { get { return _maxPersons; } }
         public long RemainingMs { get { return _remainingMs; } }
         public long SetMs { get { return _setMs; } }
+
+        public double ExtraVerticalHeightReduction
+        {
+            get { return _extraVerticalHeightReduction; }
+            set
+            {
+                if (Math.Abs(_extraVerticalHeightReduction - value) > 0.01)
+                {
+                    _extraVerticalHeightReduction = value;
+                    UpdateSectionRowHeights();
+                }
+            }
+        }
 
         public bool IsMuted
         {
@@ -1751,6 +2126,15 @@ namespace VzpenjacaKontrola
                 {
                     ApplyOrientationLayout(shouldBeNarrow);
                 }
+                else
+                {
+                    UpdateSectionRowHeights();
+                }
+            };
+
+            _contentGrid.SizeChanged += (s, e) =>
+            {
+                UpdateSectionRowHeights();
             };
 
             Grid.SetRow(_contentGrid, 1);
@@ -1922,10 +2306,56 @@ namespace VzpenjacaKontrola
                 Grid.SetColumn(_personsSection, 2);
             }
 
-            if (_timeSection.RowDefinitions.Count >= 2)
+            UpdateSectionRowHeights();
+        }
+
+        private void UpdateSectionRowHeights()
+        {
+            if (_timeSection == null || _personsSection == null) return;
+            if (_timeSection.RowDefinitions.Count < 2 || _personsSection.RowDefinitions.Count < 2) return;
+
+            double contentH = _contentGrid != null ? _contentGrid.ActualHeight : 0.0;
+            if (contentH <= 10.0)
+            {
                 _timeSection.RowDefinitions[0].Height = new GridLength(1.1, GridUnitType.Star);
-            if (_personsSection.RowDefinitions.Count >= 2)
+                _timeSection.RowDefinitions[1].Height = new GridLength(1.0, GridUnitType.Star);
                 _personsSection.RowDefinitions[0].Height = new GridLength(1.1, GridUnitType.Star);
+                _personsSection.RowDefinitions[1].Height = new GridLength(1.0, GridUnitType.Star);
+                return;
+            }
+
+            double sectionActualH;
+            double sectionUnreducedH;
+            double minButtonsH;
+
+            if (_isNarrowLayout)
+            {
+                sectionActualH = Math.Max(0.0, (contentH - 10.0) * 0.5);
+                sectionUnreducedH = sectionActualH + (_extraVerticalHeightReduction * 0.5);
+                minButtonsH = 54.0;
+            }
+            else
+            {
+                sectionActualH = contentH;
+                sectionUnreducedH = sectionActualH + _extraVerticalHeightReduction;
+                minButtonsH = 62.0;
+            }
+
+            double displayRowH = Math.Round(sectionUnreducedH * (1.1 / 2.1));
+            if (!_isNarrowLayout && displayRowH < 126.0)
+            {
+                displayRowH = 126.0;
+            }
+
+            if (sectionActualH - displayRowH < minButtonsH)
+            {
+                displayRowH = Math.Max(60.0, sectionActualH - minButtonsH);
+            }
+
+            _timeSection.RowDefinitions[0].Height = new GridLength(displayRowH, GridUnitType.Pixel);
+            _timeSection.RowDefinitions[1].Height = new GridLength(1.0, GridUnitType.Star);
+            _personsSection.RowDefinitions[0].Height = new GridLength(displayRowH, GridUnitType.Pixel);
+            _personsSection.RowDefinitions[1].Height = new GridLength(1.0, GridUnitType.Star);
         }
 
         private void AddButtonToGrid(Grid grid, ModernActionButton btn, int row, int col)
@@ -2072,11 +2502,18 @@ namespace VzpenjacaKontrola
                                   (t.SetTimeMs == prevSetMs) &&
                                   (t.RemainingTimeMs - prevRemainingMs > 15000) &&
                                   (t.RemainingTimeMs >= t.SetTimeMs - 20000);
-                if (clockReset && (t.CurrentPersons == 0 || t.CurrentPersons < prevPersons) && !_isMuted)
+                if (clockReset && (t.CurrentPersons == 0 || t.CurrentPersons < prevPersons))
                 {
-                    int nextMinutes = (int)((t.SetTimeMs + 30000) / 60000);
-                    if (nextMinutes <= 0) nextMinutes = 1;
-                    ChimePlayer.SpeakDeparture(nextMinutes);
+                    if (DepartureDetected != null)
+                    {
+                        DepartureDetected();
+                    }
+                    if (!_isMuted)
+                    {
+                        int nextMinutes = (int)((t.SetTimeMs + 30000) / 60000);
+                        if (nextMinutes <= 0) nextMinutes = 1;
+                        ChimePlayer.SpeakDeparture(nextMinutes);
+                    }
                 }
             }
 
@@ -2126,6 +2563,11 @@ namespace VzpenjacaKontrola
             }
             _timerProgressFill.Width = 0;
             _personsProgressFill.Width = 0;
+
+            if (StateTicked != null)
+            {
+                StateTicked();
+            }
 
             if (wasOnline && TelemetryUpdated != null)
             {
@@ -2182,6 +2624,10 @@ namespace VzpenjacaKontrola
             _lastTimeZone = timeZone;
 
             UpdateProgressBars();
+            if (StateTicked != null)
+            {
+                StateTicked();
+            }
         }
 
         private void RenderPersons(bool suppressChime = false)
@@ -3273,8 +3719,12 @@ namespace VzpenjacaKontrola
         private const int IDM_TOGGLE_CONTROLS = 0x1013;
         private const int IDM_VIEW_CLASSIC = 0x1014;
         private const int IDM_VIEW_UNDER = 0x1015;
+        private const int IDM_SHOW_FUNICULAR_TRACK = 0x1016;
         private const int IDM_EXIT = 0x1019;
         private const int IDM_VERSION = 0x1020;
+
+        private const double HiddenMiddleGapHeight = 10.0;
+        private const double VisibleFunicularRowHeight = 56.0;
 
         private const int DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19;
         private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
@@ -3301,12 +3751,16 @@ namespace VzpenjacaKontrola
         private readonly AppConfig _config;
         private readonly StationCardControl _cardZgoraj;
         private readonly StationCardControl _cardSpodaj;
+        private readonly RowDefinition _rowFunicularTrack;
+        private readonly FunicularTrackControl _funicularTrack;
         private readonly CloudRelayBridge _cloudBridge;
         private IntPtr _hSysMenu = IntPtr.Zero;
         private bool _isInitialized = false;
         private Forms.NotifyIcon _trayIcon;
         private bool _isExplicitExit = false;
         private bool _hasShownTrayBalloon = false;
+        private string _lastDepartedStationId = "zgoraj";
+        private double _lastKnownSingleCarPos = 0.0;
 
         public MainWindow()
         {
@@ -3347,7 +3801,11 @@ namespace VzpenjacaKontrola
                 Margin = new Thickness(12)
             };
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-            mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(10, GridUnitType.Pixel) });
+            _rowFunicularTrack = new RowDefinition
+            {
+                Height = new GridLength(_config.ShowFunicularTrack ? VisibleFunicularRowHeight : HiddenMiddleGapHeight, GridUnitType.Pixel)
+            };
+            mainGrid.RowDefinitions.Add(_rowFunicularTrack);
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
             _cardZgoraj = new StationCardControl("ZGORNJA POSTAJA", _config.IpZgoraj, _config.CounterScale, _config.MuteZgoraj, _config.DimZgoraj, _config.ShowIntervalBgZgoraj, _config.ShowCapacityZgoraj, _config.CounterViewMode);
@@ -3359,7 +3817,24 @@ namespace VzpenjacaKontrola
                 _config.ShowCapacityZgoraj = _cardZgoraj.ShowCapacityUnder;
                 _config.Save();
             };
+            _cardZgoraj.DepartureDetected += () =>
+            {
+                _lastDepartedStationId = "zgoraj";
+                SyncFunicularPosition();
+            };
+            _cardZgoraj.StateTicked += SyncFunicularPosition;
             Grid.SetRow(_cardZgoraj, 0);
+
+            _funicularTrack = new FunicularTrackControl(_config.FunicularTrackReversed)
+            {
+                Margin = new Thickness(0, 6, 0, 6)
+            };
+            _funicularTrack.DirectionToggled += () =>
+            {
+                _config.FunicularTrackReversed = _funicularTrack.IsZgornjaToSpodnja;
+                _config.Save();
+            };
+            Grid.SetRow(_funicularTrack, 1);
 
             _cardSpodaj = new StationCardControl("SPODNJA POSTAJA", _config.IpSpodaj, _config.CounterScale, _config.MuteSpodaj, _config.DimSpodaj, _config.ShowIntervalBgSpodaj, _config.ShowCapacitySpodaj, _config.CounterViewMode);
             _cardSpodaj.QuickSettingsChanged += () =>
@@ -3370,10 +3845,20 @@ namespace VzpenjacaKontrola
                 _config.ShowCapacitySpodaj = _cardSpodaj.ShowCapacityUnder;
                 _config.Save();
             };
+            _cardSpodaj.DepartureDetected += () =>
+            {
+                _lastDepartedStationId = "spodaj";
+                SyncFunicularPosition();
+            };
+            _cardSpodaj.StateTicked += SyncFunicularPosition;
             Grid.SetRow(_cardSpodaj, 2);
 
             mainGrid.Children.Add(_cardZgoraj);
+            mainGrid.Children.Add(_funicularTrack);
             mainGrid.Children.Add(_cardSpodaj);
+
+            ApplyFunicularTrackVisibility();
+            SyncFunicularPosition();
 
             _cloudBridge = new CloudRelayBridge(_config, _cardZgoraj, _cardSpodaj);
 
@@ -3537,6 +4022,107 @@ namespace VzpenjacaKontrola
             RefreshSystemMenu();
         }
 
+        private void ApplyFunicularTrackVisibility()
+        {
+            bool show = _config.ShowFunicularTrack;
+            if (_funicularTrack != null)
+            {
+                _funicularTrack.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+            }
+            if (_rowFunicularTrack != null)
+            {
+                _rowFunicularTrack.Height = new GridLength(
+                    show ? VisibleFunicularRowHeight : HiddenMiddleGapHeight,
+                    GridUnitType.Pixel);
+            }
+
+            double perCardReduction = show ? ((VisibleFunicularRowHeight - HiddenMiddleGapHeight) * 0.5) : 0.0;
+            if (_cardZgoraj != null)
+                _cardZgoraj.ExtraVerticalHeightReduction = perCardReduction;
+            if (_cardSpodaj != null)
+                _cardSpodaj.ExtraVerticalHeightReduction = perCardReduction;
+        }
+
+        public void ToggleFunicularTrack()
+        {
+            _config.ShowFunicularTrack = !_config.ShowFunicularTrack;
+            ApplyFunicularTrackVisibility();
+            _config.Save();
+            RefreshSystemMenu();
+        }
+
+        private void SyncFunicularPosition()
+        {
+            if (_funicularTrack == null) return;
+
+            int totalSec = Math.Max(10, Math.Min(600, _config.RideDurationSec));
+            long rideDurationMs = totalSec * 1000L;
+
+            bool sOnline = _cardSpodaj != null && _cardSpodaj.IsOnline;
+            long sRem = _cardSpodaj != null ? _cardSpodaj.RemainingMs : 0L;
+            long sSet = _cardSpodaj != null ? _cardSpodaj.SetMs : 0L;
+
+            bool zOnline = _cardZgoraj != null && _cardZgoraj.IsOnline;
+            long zRem = _cardZgoraj != null ? _cardZgoraj.RemainingMs : 0L;
+            long zSet = _cardZgoraj != null ? _cardZgoraj.SetMs : 0L;
+
+            if (!sOnline && !zOnline)
+            {
+                bool isFromSpodnjaLast = string.Equals(_lastDepartedStationId, "spodaj", StringComparison.OrdinalIgnoreCase);
+                _funicularTrack.SetRideState(false, false, isFromSpodnjaLast, _lastKnownSingleCarPos, 0L, totalSec);
+                return;
+            }
+
+            long sElapsed = (sOnline && sSet >= rideDurationMs && sRem >= 1L && sRem < sSet) ? (sSet - sRem) : -1L;
+            long zElapsed = (zOnline && zSet >= rideDurationMs && zRem >= 1L && zRem < zSet) ? (zSet - zRem) : -1L;
+
+            string activeStationId;
+            if (sElapsed > 0L && zElapsed > 0L)
+            {
+                if (sElapsed < zElapsed) activeStationId = "spodaj";
+                else if (zElapsed < sElapsed) activeStationId = "zgoraj";
+                else activeStationId = _lastDepartedStationId;
+            }
+            else if (sElapsed > 0L)
+            {
+                activeStationId = "spodaj";
+            }
+            else if (zElapsed > 0L)
+            {
+                activeStationId = "zgoraj";
+            }
+            else
+            {
+                activeStationId = _lastDepartedStationId;
+            }
+            _lastDepartedStationId = activeStationId;
+
+            long activeElapsed = string.Equals(activeStationId, "spodaj", StringComparison.OrdinalIgnoreCase) ? sElapsed : zElapsed;
+            bool isFromSpodnja = string.Equals(activeStationId, "spodaj", StringComparison.OrdinalIgnoreCase);
+
+            if (activeElapsed >= 1L && activeElapsed <= rideDurationMs)
+            {
+                double progress = Math.Max(0.0, Math.Min(1.0, (double)activeElapsed / (double)rideDurationMs));
+                double pos = isFromSpodnja ? progress : (1.0 - progress);
+                _lastKnownSingleCarPos = pos;
+                _funicularTrack.SetRideState(true, true, isFromSpodnja, pos, activeElapsed, totalSec);
+            }
+            else
+            {
+                double dockedPos;
+                if (activeElapsed > rideDurationMs)
+                {
+                    dockedPos = isFromSpodnja ? 1.0 : 0.0;
+                }
+                else
+                {
+                    dockedPos = _lastKnownSingleCarPos;
+                }
+                _lastKnownSingleCarPos = dockedPos;
+                _funicularTrack.SetRideState(true, false, isFromSpodnja, dockedPos, 0L, totalSec);
+            }
+        }
+
         private void ApplyWindowChrome()
         {
             if (_config.HideWindowControls)
@@ -3610,6 +4196,7 @@ namespace VzpenjacaKontrola
                 uint cloudFlag = _config.CloudRelayEnabled ? MF_CHECKED : MF_UNCHECKED;
                 uint viewClassicFlag = _config.CounterViewMode == 0 ? MF_CHECKED : MF_UNCHECKED;
                 uint viewUnderFlag = _config.CounterViewMode == 1 ? MF_CHECKED : MF_UNCHECKED;
+                uint funicularTrackFlag = _config.ShowFunicularTrack ? MF_CHECKED : MF_UNCHECKED;
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | topFlag, (UIntPtr)IDM_ALWAYS_ON_TOP, "Vedno na vrhu");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | autostartFlag, (UIntPtr)IDM_START_WITH_WINDOWS, "Zaženi ob zagonu računalnika");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | soundFlag, (UIntPtr)IDM_SOUND_ENABLED, "Zvočna opozorila");
@@ -3619,6 +4206,7 @@ namespace VzpenjacaKontrola
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | viewClassicFlag, (UIntPtr)IDM_VIEW_CLASSIC, "Prikaz števcev: Klasični (ob številki)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | viewUnderFlag, (UIntPtr)IDM_VIEW_UNDER, "Prikaz števcev: Pod številko (spodaj)");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | funicularTrackFlag, (UIntPtr)IDM_SHOW_FUNICULAR_TRACK, "Prikaz položaja vzpenjače");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_IN, "Povečaj števce\t(Ctrl +)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_OUT, "Pomanjšaj števce\t(Ctrl -)");
@@ -3687,6 +4275,7 @@ namespace VzpenjacaKontrola
                 Forms.MenuItem mnuSound = new Forms.MenuItem("Zvočna opozorila", (s, e) => ToggleSound());
                 Forms.MenuItem mnuViewClassic = new Forms.MenuItem("Prikaz števcev: Klasični", (s, e) => SetCounterViewMode(0));
                 Forms.MenuItem mnuViewUnder = new Forms.MenuItem("Prikaz števcev: Pod številko", (s, e) => SetCounterViewMode(1));
+                Forms.MenuItem mnuFunicularTrack = new Forms.MenuItem("Prikaz položaja vzpenjače", (s, e) => ToggleFunicularTrack());
                 Forms.MenuItem mnuExit = new Forms.MenuItem("Izhod", (s, e) => ExitApplication());
 
                 trayMenu.Popup += (s, e) =>
@@ -3695,6 +4284,7 @@ namespace VzpenjacaKontrola
                     mnuSound.Checked = _config.SoundEnabled;
                     mnuViewClassic.Checked = (_config.CounterViewMode == 0);
                     mnuViewUnder.Checked = (_config.CounterViewMode == 1);
+                    mnuFunicularTrack.Checked = _config.ShowFunicularTrack;
                 };
 
                 trayMenu.MenuItems.Add(mnuOpen);
@@ -3704,6 +4294,7 @@ namespace VzpenjacaKontrola
                 trayMenu.MenuItems.Add("-");
                 trayMenu.MenuItems.Add(mnuViewClassic);
                 trayMenu.MenuItems.Add(mnuViewUnder);
+                trayMenu.MenuItems.Add(mnuFunicularTrack);
                 trayMenu.MenuItems.Add("-");
                 trayMenu.MenuItems.Add(mnuExit);
 
@@ -3888,6 +4479,11 @@ namespace VzpenjacaKontrola
                 else if (cmd == IDM_VIEW_UNDER)
                 {
                     SetCounterViewMode(1);
+                    handled = true;
+                }
+                else if (cmd == IDM_SHOW_FUNICULAR_TRACK)
+                {
+                    ToggleFunicularTrack();
                     handled = true;
                 }
                 else if (cmd == IDM_ZOOM_IN)
