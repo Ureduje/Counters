@@ -1095,9 +1095,8 @@ namespace VzpenjacaKontrola
     /// Horizontal real-time visualization of the single funicular car on tracks,
     /// ported from Android's FunicularTrackView and placed between Zgornja and Spodnja station cards.
     /// </summary>
-    public class FunicularTrackControl : FrameworkElement
+    public class FunicularTrackControl : Border
     {
-        private static readonly Pen BorderPen = CreateFrozenPen(ThemePalette.CardBorder, 1.0, PenLineCap.Flat, PenLineJoin.Miter);
         private static readonly Pen SleeperPen = CreateFrozenPen(ThemePalette.Divider, 1.3, PenLineCap.Round, PenLineJoin.Round);
         private static readonly Pen RailPen = CreateFrozenPen(ThemePalette.BtnBorder, 2.2, PenLineCap.Round, PenLineJoin.Round);
         private static readonly Pen ActiveTrailEmeraldPen = CreateFrozenPen(ThemePalette.AccentEmerald, 2.4, PenLineCap.Round, PenLineJoin.Round);
@@ -1105,6 +1104,7 @@ namespace VzpenjacaKontrola
         private static readonly Pen CarStrokeEmeraldPen = CreateFrozenPen(ThemePalette.AccentEmerald, 1.5, PenLineCap.Round, PenLineJoin.Round);
         private static readonly Pen CarStrokeBluePen = CreateFrozenPen(ThemePalette.AccentBlue, 1.5, PenLineCap.Round, PenLineJoin.Round);
         private static readonly Pen CarStrokeIdlePen = CreateFrozenPen(ThemePalette.TextSecondary, 1.5, PenLineCap.Round, PenLineJoin.Round);
+        private static readonly Pen HoverPillPen = CreateFrozenPen(ThemePalette.BtnHoverBorder, 1.0, PenLineCap.Round, PenLineJoin.Round);
 
         private static readonly SolidColorBrush WinOnlineRidingBrush = CreateAlphaBrush("#F8FAFC", 225);
         private static readonly SolidColorBrush WinOnlineDockedBrush = CreateAlphaBrush("#F8FAFC", 150);
@@ -1134,6 +1134,7 @@ namespace VzpenjacaKontrola
         private long _rideElapsedMs = 0L;
         private int _totalRideDurationSec = 90;
         private bool _hasInitializedPos = false;
+        private bool _isHovered = false;
 
         public event Action DirectionToggled;
 
@@ -1153,9 +1154,19 @@ namespace VzpenjacaKontrola
             }
         }
 
+        public void ToggleDirection()
+        {
+            IsZgornjaToSpodnja = !IsZgornjaToSpodnja;
+            if (DirectionToggled != null) DirectionToggled();
+        }
+
         public FunicularTrackControl(bool initialZgornjaToSpodnja = false)
         {
             _isZgornjaToSpodnja = initialZgornjaToSpodnja;
+            Background = ThemePalette.CardBg;
+            BorderBrush = ThemePalette.CardBorder;
+            BorderThickness = new Thickness(1);
+            CornerRadius = new CornerRadius(8);
             SnapsToDevicePixels = true;
             UseLayoutRounding = true;
             Cursor = Cursors.Hand;
@@ -1182,10 +1193,28 @@ namespace VzpenjacaKontrola
                 }
             };
 
+            MouseEnter += (s, e) =>
+            {
+                _isHovered = true;
+                BorderBrush = ThemePalette.BtnHoverBorder;
+                InvalidateVisual();
+            };
+
+            MouseLeave += (s, e) =>
+            {
+                _isHovered = false;
+                BorderBrush = ThemePalette.CardBorder;
+                InvalidateVisual();
+            };
+
+            MouseLeftButtonDown += (s, e) =>
+            {
+                e.Handled = true;
+                ToggleDirection();
+            };
+
             MouseLeftButtonUp += (s, e) =>
             {
-                IsZgornjaToSpodnja = !IsZgornjaToSpodnja;
-                if (DirectionToggled != null) DirectionToggled();
                 e.Handled = true;
             };
         }
@@ -1236,9 +1265,6 @@ namespace VzpenjacaKontrola
             double h = ActualHeight;
             if (w <= 2.0 || h <= 2.0) return;
 
-            Rect cardBounds = new Rect(0.5, 0.5, w - 1.0, h - 1.0);
-            dc.DrawRoundedRectangle(ThemePalette.CardBg, BorderPen, cardBounds, 8.0, 8.0);
-
             double padX = 14.0;
             double headerBaselineY = h * 0.33;
             double labelFontSize = Math.Max(9.5, Math.Min(11.5, h * 0.22));
@@ -1275,6 +1301,22 @@ namespace VzpenjacaKontrola
                 Brush statusBrush = isHeadingToZgornja ? ThemePalette.AccentEmerald : ThemePalette.AccentBlue;
                 FormattedText ftStatus = CreateFormattedText(statusStr, StatusTypeface, labelFontSize, statusBrush);
                 dc.DrawText(ftStatus, new Point((w - ftStatus.Width) * 0.5, headerBaselineY - ftStatus.Baseline));
+            }
+            else
+            {
+                string swapStr = "⇄ zamenjaj smer";
+                Brush swapBrush = _isHovered ? ThemePalette.TextPrimary : ThemePalette.TextMuted;
+                FormattedText ftSwap = CreateFormattedText(swapStr, LabelTypeface, Math.Max(9.0, labelFontSize - 0.5), swapBrush);
+                double textX = (w - ftSwap.Width) * 0.5;
+                double textY = headerBaselineY - ftSwap.Baseline;
+
+                if (_isHovered)
+                {
+                    Rect pillRect = new Rect(textX - 6.0, textY - 1.5, ftSwap.Width + 12.0, ftSwap.Height + 3.0);
+                    dc.DrawRoundedRectangle(ThemePalette.BtnHoverBg, HoverPillPen, pillRect, 4.0, 4.0);
+                }
+
+                dc.DrawText(ftSwap, new Point(textX, textY));
             }
 
             // 2. Horizontal Railway Track
@@ -3720,6 +3762,7 @@ namespace VzpenjacaKontrola
         private const int IDM_VIEW_CLASSIC = 0x1014;
         private const int IDM_VIEW_UNDER = 0x1015;
         private const int IDM_SHOW_FUNICULAR_TRACK = 0x1016;
+        private const int IDM_FUNICULAR_DIRECTION = 0x1017;
         private const int IDM_EXIT = 0x1019;
         private const int IDM_VERSION = 0x1020;
 
@@ -3833,6 +3876,8 @@ namespace VzpenjacaKontrola
             {
                 _config.FunicularTrackReversed = _funicularTrack.IsZgornjaToSpodnja;
                 _config.Save();
+                SyncFunicularPosition();
+                RefreshSystemMenu();
             };
             Grid.SetRow(_funicularTrack, 1);
 
@@ -4051,6 +4096,20 @@ namespace VzpenjacaKontrola
             RefreshSystemMenu();
         }
 
+        public void ToggleFunicularDirection()
+        {
+            if (_funicularTrack != null)
+            {
+                _funicularTrack.ToggleDirection();
+            }
+            else
+            {
+                _config.FunicularTrackReversed = !_config.FunicularTrackReversed;
+                _config.Save();
+                RefreshSystemMenu();
+            }
+        }
+
         private void SyncFunicularPosition()
         {
             if (_funicularTrack == null) return;
@@ -4197,6 +4256,7 @@ namespace VzpenjacaKontrola
                 uint viewClassicFlag = _config.CounterViewMode == 0 ? MF_CHECKED : MF_UNCHECKED;
                 uint viewUnderFlag = _config.CounterViewMode == 1 ? MF_CHECKED : MF_UNCHECKED;
                 uint funicularTrackFlag = _config.ShowFunicularTrack ? MF_CHECKED : MF_UNCHECKED;
+                uint funicularDirFlag = _config.FunicularTrackReversed ? MF_CHECKED : MF_UNCHECKED;
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | topFlag, (UIntPtr)IDM_ALWAYS_ON_TOP, "Vedno na vrhu");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | autostartFlag, (UIntPtr)IDM_START_WITH_WINDOWS, "Zaženi ob zagonu računalnika");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | soundFlag, (UIntPtr)IDM_SOUND_ENABLED, "Zvočna opozorila");
@@ -4207,6 +4267,7 @@ namespace VzpenjacaKontrola
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | viewClassicFlag, (UIntPtr)IDM_VIEW_CLASSIC, "Prikaz števcev: Klasični (ob številki)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | viewUnderFlag, (UIntPtr)IDM_VIEW_UNDER, "Prikaz števcev: Pod številko (spodaj)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | funicularTrackFlag, (UIntPtr)IDM_SHOW_FUNICULAR_TRACK, "Prikaz položaja vzpenjače");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | funicularDirFlag, (UIntPtr)IDM_FUNICULAR_DIRECTION, "Obrni smer tirnice (Zgornja ↔ Spodnja)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_IN, "Povečaj števce\t(Ctrl +)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_OUT, "Pomanjšaj števce\t(Ctrl -)");
@@ -4276,6 +4337,7 @@ namespace VzpenjacaKontrola
                 Forms.MenuItem mnuViewClassic = new Forms.MenuItem("Prikaz števcev: Klasični", (s, e) => SetCounterViewMode(0));
                 Forms.MenuItem mnuViewUnder = new Forms.MenuItem("Prikaz števcev: Pod številko", (s, e) => SetCounterViewMode(1));
                 Forms.MenuItem mnuFunicularTrack = new Forms.MenuItem("Prikaz položaja vzpenjače", (s, e) => ToggleFunicularTrack());
+                Forms.MenuItem mnuFunicularDir = new Forms.MenuItem("Obrni smer tirnice (Zgornja ↔ Spodnja)", (s, e) => ToggleFunicularDirection());
                 Forms.MenuItem mnuExit = new Forms.MenuItem("Izhod", (s, e) => ExitApplication());
 
                 trayMenu.Popup += (s, e) =>
@@ -4285,6 +4347,8 @@ namespace VzpenjacaKontrola
                     mnuViewClassic.Checked = (_config.CounterViewMode == 0);
                     mnuViewUnder.Checked = (_config.CounterViewMode == 1);
                     mnuFunicularTrack.Checked = _config.ShowFunicularTrack;
+                    mnuFunicularDir.Checked = _config.FunicularTrackReversed;
+                    mnuFunicularDir.Enabled = _config.ShowFunicularTrack;
                 };
 
                 trayMenu.MenuItems.Add(mnuOpen);
@@ -4295,6 +4359,7 @@ namespace VzpenjacaKontrola
                 trayMenu.MenuItems.Add(mnuViewClassic);
                 trayMenu.MenuItems.Add(mnuViewUnder);
                 trayMenu.MenuItems.Add(mnuFunicularTrack);
+                trayMenu.MenuItems.Add(mnuFunicularDir);
                 trayMenu.MenuItems.Add("-");
                 trayMenu.MenuItems.Add(mnuExit);
 
@@ -4484,6 +4549,11 @@ namespace VzpenjacaKontrola
                 else if (cmd == IDM_SHOW_FUNICULAR_TRACK)
                 {
                     ToggleFunicularTrack();
+                    handled = true;
+                }
+                else if (cmd == IDM_FUNICULAR_DIRECTION)
+                {
+                    ToggleFunicularDirection();
                     handled = true;
                 }
                 else if (cmd == IDM_ZOOM_IN)
