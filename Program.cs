@@ -1104,7 +1104,6 @@ namespace VzpenjacaKontrola
         private static readonly Pen CarStrokeEmeraldPen = CreateFrozenPen(ThemePalette.AccentEmerald, 1.5, PenLineCap.Round, PenLineJoin.Round);
         private static readonly Pen CarStrokeBluePen = CreateFrozenPen(ThemePalette.AccentBlue, 1.5, PenLineCap.Round, PenLineJoin.Round);
         private static readonly Pen CarStrokeIdlePen = CreateFrozenPen(ThemePalette.TextSecondary, 1.5, PenLineCap.Round, PenLineJoin.Round);
-        private static readonly Pen HoverPillPen = CreateFrozenPen(ThemePalette.BtnHoverBorder, 1.0, PenLineCap.Round, PenLineJoin.Round);
 
         private static readonly SolidColorBrush WinOnlineRidingBrush = CreateAlphaBrush("#F8FAFC", 225);
         private static readonly SolidColorBrush WinOnlineDockedBrush = CreateAlphaBrush("#F8FAFC", 150);
@@ -1134,8 +1133,8 @@ namespace VzpenjacaKontrola
         private long _rideElapsedMs = 0L;
         private int _totalRideDurationSec = 90;
         private bool _hasInitializedPos = false;
-        private bool _isHovered = false;
 
+        public event Action DirectionToggleRequested;
         public event Action DirectionToggled;
 
         public bool IsZgornjaToSpodnja
@@ -1195,22 +1194,24 @@ namespace VzpenjacaKontrola
 
             MouseEnter += (s, e) =>
             {
-                _isHovered = true;
                 BorderBrush = ThemePalette.BtnHoverBorder;
-                InvalidateVisual();
             };
 
             MouseLeave += (s, e) =>
             {
-                _isHovered = false;
                 BorderBrush = ThemePalette.CardBorder;
-                InvalidateVisual();
             };
 
             MouseLeftButtonDown += (s, e) =>
             {
                 e.Handled = true;
-                ToggleDirection();
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (DirectionToggleRequested != null)
+                        DirectionToggleRequested();
+                    else
+                        ToggleDirection();
+                }));
             };
 
             MouseLeftButtonUp += (s, e) =>
@@ -1301,22 +1302,6 @@ namespace VzpenjacaKontrola
                 Brush statusBrush = isHeadingToZgornja ? ThemePalette.AccentEmerald : ThemePalette.AccentBlue;
                 FormattedText ftStatus = CreateFormattedText(statusStr, StatusTypeface, labelFontSize, statusBrush);
                 dc.DrawText(ftStatus, new Point((w - ftStatus.Width) * 0.5, headerBaselineY - ftStatus.Baseline));
-            }
-            else
-            {
-                string swapStr = "⇄ zamenjaj smer";
-                Brush swapBrush = _isHovered ? ThemePalette.TextPrimary : ThemePalette.TextMuted;
-                FormattedText ftSwap = CreateFormattedText(swapStr, LabelTypeface, Math.Max(9.0, labelFontSize - 0.5), swapBrush);
-                double textX = (w - ftSwap.Width) * 0.5;
-                double textY = headerBaselineY - ftSwap.Baseline;
-
-                if (_isHovered)
-                {
-                    Rect pillRect = new Rect(textX - 6.0, textY - 1.5, ftSwap.Width + 12.0, ftSwap.Height + 3.0);
-                    dc.DrawRoundedRectangle(ThemePalette.BtnHoverBg, HoverPillPen, pillRect, 4.0, 4.0);
-                }
-
-                dc.DrawText(ftSwap, new Point(textX, textY));
             }
 
             // 2. Horizontal Railway Track
@@ -3872,6 +3857,10 @@ namespace VzpenjacaKontrola
             {
                 Margin = new Thickness(0, 6, 0, 6)
             };
+            _funicularTrack.DirectionToggleRequested += () =>
+            {
+                ToggleFunicularDirection(true);
+            };
             _funicularTrack.DirectionToggled += () =>
             {
                 _config.FunicularTrackReversed = _funicularTrack.IsZgornjaToSpodnja;
@@ -4096,8 +4085,24 @@ namespace VzpenjacaKontrola
             RefreshSystemMenu();
         }
 
-        public void ToggleFunicularDirection()
+        public void ToggleFunicularDirection(bool requireConfirmation = true)
         {
+            if (requireConfirmation)
+            {
+                MessageBoxResult res = MessageBox.Show(
+                    this,
+                    "Ali želite obrniti smer prikaza tirnice (Zgornja ↔ Spodnja)?",
+                    "Potrditev menjave smeri",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question,
+                    MessageBoxResult.No);
+
+                if (res != MessageBoxResult.Yes)
+                {
+                    return;
+                }
+            }
+
             if (_funicularTrack != null)
             {
                 _funicularTrack.ToggleDirection();
