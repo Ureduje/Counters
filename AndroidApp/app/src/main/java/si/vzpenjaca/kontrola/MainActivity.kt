@@ -3317,7 +3317,7 @@ class VerticalStationPager(
         }
 
         footerVersionText = TextView(context).apply {
-            text = "v1.2.2"
+            text = "v1.2.3"
             setTextColor(ThemeColors.TextMuted)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.create("sans-serif", Typeface.NORMAL)
