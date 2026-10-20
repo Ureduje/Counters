@@ -1139,6 +1139,8 @@ namespace VzpenjacaKontrola
         private long _rideElapsedMs = 0L;
         private int _totalRideDurationSec = 90;
         private bool _hasInitializedPos = false;
+        private Rect _leftLabelHitRect = Rect.Empty;
+        private Rect _rightLabelHitRect = Rect.Empty;
 
         public event Action DirectionToggleRequested;
         public event Action DirectionToggled;
@@ -1174,8 +1176,7 @@ namespace VzpenjacaKontrola
             CornerRadius = new CornerRadius(8);
             SnapsToDevicePixels = true;
             UseLayoutRounding = true;
-            Cursor = Cursors.Hand;
-            ToolTip = "Položaj vzpenjače v realnem času (kliknite za menjavo smeri Spodnja ↔ Zgornja)";
+            ToolTip = "Položaj vzpenjače v realnem času (kliknite na ZGORNJA ali SPODNJA za menjavo smeri)";
 
             _animTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(33) };
             _animTimer.Tick += (s, e) =>
@@ -1198,31 +1199,41 @@ namespace VzpenjacaKontrola
                 }
             };
 
-            MouseEnter += (s, e) =>
+            MouseMove += (s, e) =>
             {
-                BorderBrush = ThemePalette.BtnHoverBorder;
+                Point pt = e.GetPosition(this);
+                bool onLabel = _leftLabelHitRect.Contains(pt) || _rightLabelHitRect.Contains(pt);
+                Cursor = onLabel ? Cursors.Hand : Cursors.Arrow;
             };
 
             MouseLeave += (s, e) =>
             {
-                BorderBrush = ThemePalette.CardBorder;
+                Cursor = Cursors.Arrow;
             };
 
             MouseLeftButtonDown += (s, e) =>
             {
-                e.Handled = true;
-                Dispatcher.BeginInvoke(new Action(() =>
+                Point pt = e.GetPosition(this);
+                if (_leftLabelHitRect.Contains(pt) || _rightLabelHitRect.Contains(pt))
                 {
-                    if (DirectionToggleRequested != null)
-                        DirectionToggleRequested();
-                    else
-                        ToggleDirection();
-                }));
+                    e.Handled = true;
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (DirectionToggleRequested != null)
+                            DirectionToggleRequested();
+                        else
+                            ToggleDirection();
+                    }));
+                }
             };
 
             MouseLeftButtonUp += (s, e) =>
             {
-                e.Handled = true;
+                Point pt = e.GetPosition(this);
+                if (_leftLabelHitRect.Contains(pt) || _rightLabelHitRect.Contains(pt))
+                {
+                    e.Handled = true;
+                }
             };
         }
 
@@ -1343,7 +1354,13 @@ namespace VzpenjacaKontrola
                 : (leftActive ? ThemePalette.AccentBlue : ThemePalette.TextSecondary);
 
             FormattedText ftLeft = CreateFormattedText(leftLabelText, LabelTypeface, labelFontSize, leftBrush);
-            dc.DrawText(ftLeft, new Point(padX, headerBaselineY - ftLeft.Baseline));
+            double leftTextY = headerBaselineY - ftLeft.Baseline;
+            dc.DrawText(ftLeft, new Point(padX, leftTextY));
+            _leftLabelHitRect = new Rect(
+                Math.Max(0.0, padX - 8.0),
+                Math.Max(0.0, leftTextY - 6.0),
+                ftLeft.Width + 16.0,
+                ftLeft.Height + 12.0);
 
             bool rightActive = _isRiding && (_isZgornjaToSpodnja ? !isHeadingToZgornja : isHeadingToZgornja);
             Brush rightBrush = !_isOnline
@@ -1351,7 +1368,14 @@ namespace VzpenjacaKontrola
                 : (rightActive ? ThemePalette.AccentBlue : ThemePalette.TextSecondary);
 
             FormattedText ftRight = CreateFormattedText(rightLabelText, LabelTypeface, labelFontSize, rightBrush);
-            dc.DrawText(ftRight, new Point(w - padX - ftRight.Width, headerBaselineY - ftRight.Baseline));
+            double rightTextX = w - padX - ftRight.Width;
+            double rightTextY = headerBaselineY - ftRight.Baseline;
+            dc.DrawText(ftRight, new Point(rightTextX, rightTextY));
+            _rightLabelHitRect = new Rect(
+                Math.Max(0.0, rightTextX - 8.0),
+                Math.Max(0.0, rightTextY - 6.0),
+                ftRight.Width + 16.0,
+                ftRight.Height + 12.0);
 
             if (_isRiding)
             {
@@ -1410,13 +1434,13 @@ namespace VzpenjacaKontrola
             Rect carRect = new Rect(carX - carHalfW, carTop, carHalfW * 2.0, carH);
 
             // Undercarriage bogie / wheels on the rail
-            Brush wheelBrush = _isOnline ? ThemePalette.AccentBlue : ThemePalette.TextMuted;
+            Brush wheelBrush = (_isOnline && _isRiding) ? ThemePalette.AccentBlue : ThemePalette.TextMuted;
             dc.DrawEllipse(wheelBrush, null, new Point(carX - carHalfW * 0.54, railY - wheelR * 0.25), wheelR, wheelR);
             dc.DrawEllipse(wheelBrush, null, new Point(carX + carHalfW * 0.54, railY - wheelR * 0.25), wheelR, wheelR);
 
             // Cabin body fill + border
-            Brush cabinFill = _isOnline ? ThemePalette.AccentBlueActiveBg : ThemePalette.BtnBg;
-            Pen cabinStroke = _isOnline ? CarStrokeBluePen : CarStrokeIdlePen;
+            Brush cabinFill = (_isOnline && _isRiding) ? ThemePalette.AccentBlueActiveBg : ThemePalette.BtnBg;
+            Pen cabinStroke = (_isOnline && _isRiding) ? CarStrokeBluePen : CarStrokeIdlePen;
             dc.DrawRoundedRectangle(cabinFill, cabinStroke, carRect, 3.8, 3.8);
 
             // Two panoramic cabin windows
@@ -3757,6 +3781,166 @@ namespace VzpenjacaKontrola
         }
     }
 
+    public class FunicularDirectionDialog : Window
+    {
+        public FunicularDirectionDialog(Window owner, bool currentlyZgornjaToSpodnja)
+        {
+            Owner = owner;
+            Title = "Menjava smeri tirnice — Vzpenjača";
+            Width = 390;
+            SizeToContent = SizeToContent.Height;
+            ResizeMode = ResizeMode.NoResize;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            Background = ThemePalette.WindowBg;
+            Foreground = ThemePalette.TextPrimary;
+            UseLayoutRounding = true;
+            SnapsToDevicePixels = true;
+
+            SourceInitialized += (s, e) => MainWindow.ApplyDarkTitleBar(this);
+
+            string currentDirText = currentlyZgornjaToSpodnja ? "ZGORNJA ↔ SPODNJA" : "SPODNJA ↔ ZGORNJA";
+            string nextDirText = currentlyZgornjaToSpodnja ? "SPODNJA ↔ ZGORNJA" : "ZGORNJA ↔ SPODNJA";
+
+            StackPanel root = new StackPanel { Margin = new Thickness(18, 16, 18, 16) };
+
+            TextBlock title = new TextBlock
+            {
+                Text = "Menjava smeri prikaza tirnice",
+                FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
+                FontSize = 15,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = ThemePalette.TextPrimary,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            root.Children.Add(title);
+
+            TextBlock msg = new TextBlock
+            {
+                Text = "Ali želite obrniti smer prikaza položaja vzpenjače?",
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 12.8,
+                Foreground = ThemePalette.TextSecondary,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 12)
+            };
+            root.Children.Add(msg);
+
+            Border dirCard = new Border
+            {
+                Background = ThemePalette.CardBg,
+                BorderBrush = ThemePalette.CardBorder,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(12, 10, 12, 10),
+                Margin = new Thickness(0, 0, 0, 16)
+            };
+
+            StackPanel dirStack = new StackPanel();
+
+            Grid rowCurrent = new Grid { Margin = new Thickness(0, 0, 0, 4) };
+            rowCurrent.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            rowCurrent.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            TextBlock lblCurrent = new TextBlock
+            {
+                Text = "Trenutna smer:",
+                Foreground = ThemePalette.TextMuted,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 11.5
+            };
+            TextBlock valCurrent = new TextBlock
+            {
+                Text = currentDirText,
+                Foreground = ThemePalette.TextSecondary,
+                FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 11.5
+            };
+            Grid.SetColumn(lblCurrent, 0);
+            Grid.SetColumn(valCurrent, 1);
+            rowCurrent.Children.Add(lblCurrent);
+            rowCurrent.Children.Add(valCurrent);
+
+            Grid rowNext = new Grid();
+            rowNext.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            rowNext.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            TextBlock lblNext = new TextBlock
+            {
+                Text = "Nova smer:",
+                Foreground = ThemePalette.TextSecondary,
+                FontFamily = new FontFamily("Segoe UI"),
+                FontSize = 12
+            };
+            TextBlock valNext = new TextBlock
+            {
+                Text = nextDirText,
+                Foreground = ThemePalette.AccentBlue,
+                FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 12
+            };
+            Grid.SetColumn(lblNext, 0);
+            Grid.SetColumn(valNext, 1);
+            rowNext.Children.Add(lblNext);
+            rowNext.Children.Add(valNext);
+
+            dirStack.Children.Add(rowCurrent);
+            dirStack.Children.Add(rowNext);
+            dirCard.Child = dirStack;
+            root.Children.Add(dirCard);
+
+            Grid btnGrid = new Grid();
+            btnGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            btnGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8, GridUnitType.Pixel) });
+            btnGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            ModernActionButton btnCancel = new ModernActionButton(0, "Prekliči", ThemePalette.AccentBtnMuted, 13.0)
+            {
+                Height = 36,
+                Margin = new Thickness(0)
+            };
+            btnCancel.Clicked += (b) =>
+            {
+                DialogResult = false;
+                Close();
+            };
+            Grid.SetColumn(btnCancel, 0);
+
+            ModernActionButton btnConfirm = new ModernActionButton(1, "Zamenjaj smer", ThemePalette.AccentBlue, 13.0)
+            {
+                Height = 36,
+                Margin = new Thickness(0)
+            };
+            btnConfirm.Clicked += (b) =>
+            {
+                DialogResult = true;
+                Close();
+            };
+            Grid.SetColumn(btnConfirm, 2);
+
+            btnGrid.Children.Add(btnCancel);
+            btnGrid.Children.Add(btnConfirm);
+            root.Children.Add(btnGrid);
+
+            KeyDown += (s, e) =>
+            {
+                if (e.Key == Key.Escape)
+                {
+                    DialogResult = false;
+                    Close();
+                    e.Handled = true;
+                }
+                else if (e.Key == Key.Enter)
+                {
+                    DialogResult = true;
+                    Close();
+                    e.Handled = true;
+                }
+            };
+
+            Content = root;
+        }
+    }
+
     public class MainWindow : Window
     {
         private const int WM_SYSCOMMAND = 0x0112;
@@ -4124,15 +4308,11 @@ namespace VzpenjacaKontrola
         {
             if (requireConfirmation)
             {
-                MessageBoxResult res = MessageBox.Show(
-                    this,
-                    "Ali želite obrniti smer prikaza tirnice (Zgornja ↔ Spodnja)?",
-                    "Potrditev menjave smeri",
-                    MessageBoxButton.YesNo,
-                    MessageBoxImage.Question,
-                    MessageBoxResult.No);
-
-                if (res != MessageBoxResult.Yes)
+                bool currentRev = _funicularTrack != null
+                    ? _funicularTrack.IsZgornjaToSpodnja
+                    : _config.FunicularTrackReversed;
+                FunicularDirectionDialog dlg = new FunicularDirectionDialog(this, currentRev);
+                if (dlg.ShowDialog() != true)
                 {
                     return;
                 }
@@ -4261,14 +4441,12 @@ namespace VzpenjacaKontrola
             RefreshSystemMenu();
         }
 
-        private void OnSourceInitialized(object sender, EventArgs e)
+        public static void ApplyDarkTitleBar(Window window)
         {
-            RefreshSystemMenu();
-
-            IntPtr hwnd = new WindowInteropHelper(this).Handle;
-            if (hwnd != IntPtr.Zero)
+            try
             {
-                try
+                IntPtr hwnd = new WindowInteropHelper(window).Handle;
+                if (hwnd != IntPtr.Zero)
                 {
                     int dark = 1;
                     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref dark, sizeof(int));
@@ -4279,7 +4457,18 @@ namespace VzpenjacaKontrola
                     int roundPref = DWMWCP_ROUND;
                     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref roundPref, sizeof(int));
                 }
-                catch { }
+            }
+            catch { }
+        }
+
+        private void OnSourceInitialized(object sender, EventArgs e)
+        {
+            RefreshSystemMenu();
+
+            IntPtr hwnd = new WindowInteropHelper(this).Handle;
+            if (hwnd != IntPtr.Zero)
+            {
+                ApplyDarkTitleBar(this);
 
                 HwndSource source = HwndSource.FromHwnd(hwnd);
                 if (source != null)
