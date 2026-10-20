@@ -1099,9 +1099,7 @@ namespace VzpenjacaKontrola
     {
         private static readonly Pen SleeperPen = CreateFrozenPen(ThemePalette.Divider, 1.3, PenLineCap.Round, PenLineJoin.Round);
         private static readonly Pen RailPen = CreateFrozenPen(ThemePalette.BtnBorder, 2.2, PenLineCap.Round, PenLineJoin.Round);
-        private static readonly Pen ActiveTrailEmeraldPen = CreateFrozenPen(ThemePalette.AccentEmerald, 2.4, PenLineCap.Round, PenLineJoin.Round);
         private static readonly Pen ActiveTrailBluePen = CreateFrozenPen(ThemePalette.AccentBlue, 2.4, PenLineCap.Round, PenLineJoin.Round);
-        private static readonly Pen CarStrokeEmeraldPen = CreateFrozenPen(ThemePalette.AccentEmerald, 1.5, PenLineCap.Round, PenLineJoin.Round);
         private static readonly Pen CarStrokeBluePen = CreateFrozenPen(ThemePalette.AccentBlue, 1.5, PenLineCap.Round, PenLineJoin.Round);
         private static readonly Pen CarStrokeIdlePen = CreateFrozenPen(ThemePalette.TextSecondary, 1.5, PenLineCap.Round, PenLineJoin.Round);
 
@@ -1275,19 +1273,17 @@ namespace VzpenjacaKontrola
             string rightLabelText = _isZgornjaToSpodnja ? "SPODNJA" : "ZGORNJA";
 
             bool leftActive = _isRiding && (_isZgornjaToSpodnja ? isHeadingToZgornja : !isHeadingToZgornja);
-            Brush leftActiveBrush = _isZgornjaToSpodnja ? ThemePalette.AccentEmerald : ThemePalette.AccentBlue;
             Brush leftBrush = !_isOnline
                 ? ThemePalette.TextMuted
-                : (leftActive ? leftActiveBrush : ThemePalette.TextSecondary);
+                : (leftActive ? ThemePalette.AccentBlue : ThemePalette.TextSecondary);
 
             FormattedText ftLeft = CreateFormattedText(leftLabelText, LabelTypeface, labelFontSize, leftBrush);
             dc.DrawText(ftLeft, new Point(padX, headerBaselineY - ftLeft.Baseline));
 
             bool rightActive = _isRiding && (_isZgornjaToSpodnja ? !isHeadingToZgornja : isHeadingToZgornja);
-            Brush rightActiveBrush = _isZgornjaToSpodnja ? ThemePalette.AccentBlue : ThemePalette.AccentEmerald;
             Brush rightBrush = !_isOnline
                 ? ThemePalette.TextMuted
-                : (rightActive ? rightActiveBrush : ThemePalette.TextSecondary);
+                : (rightActive ? ThemePalette.AccentBlue : ThemePalette.TextSecondary);
 
             FormattedText ftRight = CreateFormattedText(rightLabelText, LabelTypeface, labelFontSize, rightBrush);
             dc.DrawText(ftRight, new Point(w - padX - ftRight.Width, headerBaselineY - ftRight.Baseline));
@@ -1299,8 +1295,7 @@ namespace VzpenjacaKontrola
                 string statusStr = (_leftToRight ? "▶ " : "◀ ") +
                                    sec.ToString(CultureInfo.InvariantCulture) + "s / " +
                                    maxSec.ToString(CultureInfo.InvariantCulture) + "s";
-                Brush statusBrush = isHeadingToZgornja ? ThemePalette.AccentEmerald : ThemePalette.AccentBlue;
-                FormattedText ftStatus = CreateFormattedText(statusStr, StatusTypeface, labelFontSize, statusBrush);
+                FormattedText ftStatus = CreateFormattedText(statusStr, StatusTypeface, labelFontSize, ThemePalette.AccentBlue);
                 dc.DrawText(ftStatus, new Point((w - ftStatus.Width) * 0.5, headerBaselineY - ftStatus.Baseline));
             }
 
@@ -1327,47 +1322,20 @@ namespace VzpenjacaKontrola
             dc.DrawLine(RailPen, new Point(trackStartX, railY), new Point(trackEndX, railY));
 
             double carX = trackStartX + _displayPos * (trackEndX - trackStartX);
-            Brush activeBrush;
-            Pen activeTrailPen;
-            Pen activeCarPen;
-            if (!_isOnline)
-            {
-                activeBrush = ThemePalette.TextMuted;
-                activeTrailPen = RailPen;
-                activeCarPen = CarStrokeIdlePen;
-            }
-            else if (_isRiding && isHeadingToZgornja)
-            {
-                activeBrush = ThemePalette.AccentEmerald;
-                activeTrailPen = ActiveTrailEmeraldPen;
-                activeCarPen = CarStrokeEmeraldPen;
-            }
-            else if (_isRiding && !isHeadingToZgornja)
-            {
-                activeBrush = ThemePalette.AccentBlue;
-                activeTrailPen = ActiveTrailBluePen;
-                activeCarPen = CarStrokeBluePen;
-            }
-            else
-            {
-                activeBrush = ThemePalette.TextSecondary;
-                activeTrailPen = RailPen;
-                activeCarPen = CarStrokeIdlePen;
-            }
 
             // Active trail along the track behind the funicular car while riding
             if (_isOnline && _isRiding)
             {
                 double originX = _leftToRight ? trackStartX : trackEndX;
-                dc.DrawLine(activeTrailPen, new Point(originX, railY), new Point(carX, railY));
+                dc.DrawLine(ActiveTrailBluePen, new Point(originX, railY), new Point(carX, railY));
             }
 
             // Left & Right Station Track Buffers / Stops
             double stationNodeR = 3.5;
-            Brush leftNodeBrush = (_isOnline && _isRiding && !_leftToRight) ? activeBrush : ThemePalette.BtnBorder;
+            Brush leftNodeBrush = (_isOnline && _isRiding && !_leftToRight) ? ThemePalette.AccentBlue : ThemePalette.BtnBorder;
             dc.DrawEllipse(leftNodeBrush, null, new Point(trackStartX, railY), stationNodeR, stationNodeR);
 
-            Brush rightNodeBrush = (_isOnline && _isRiding && _leftToRight) ? activeBrush : ThemePalette.BtnBorder;
+            Brush rightNodeBrush = (_isOnline && _isRiding && _leftToRight) ? ThemePalette.AccentBlue : ThemePalette.BtnBorder;
             dc.DrawEllipse(rightNodeBrush, null, new Point(trackEndX, railY), stationNodeR, stationNodeR);
 
             // 3. Funicular Car sitting directly on tracks
@@ -1377,13 +1345,13 @@ namespace VzpenjacaKontrola
             Rect carRect = new Rect(carX - carHalfW, carTop, carHalfW * 2.0, carH);
 
             // Undercarriage bogie / wheels on the rail
-            Brush wheelBrush = (_isOnline && _isRiding) ? activeBrush : ThemePalette.TextMuted;
+            Brush wheelBrush = _isOnline ? ThemePalette.AccentBlue : ThemePalette.TextMuted;
             dc.DrawEllipse(wheelBrush, null, new Point(carX - carHalfW * 0.54, railY - wheelR * 0.25), wheelR, wheelR);
             dc.DrawEllipse(wheelBrush, null, new Point(carX + carHalfW * 0.54, railY - wheelR * 0.25), wheelR, wheelR);
 
             // Cabin body fill + border
-            Brush cabinFill = (_isOnline && _isRiding) ? ThemePalette.AccentBlueActiveBg : ThemePalette.BtnBg;
-            Pen cabinStroke = (_isOnline && _isRiding) ? activeCarPen : CarStrokeIdlePen;
+            Brush cabinFill = _isOnline ? ThemePalette.AccentBlueActiveBg : ThemePalette.BtnBg;
+            Pen cabinStroke = _isOnline ? CarStrokeBluePen : CarStrokeIdlePen;
             dc.DrawRoundedRectangle(cabinFill, cabinStroke, carRect, 3.8, 3.8);
 
             // Two panoramic cabin windows
@@ -1419,7 +1387,7 @@ namespace VzpenjacaKontrola
                         ctx.LineTo(new Point(arrowBaseX, arrowMidY + arrowHalfH), true, false);
                     }
                     arrowGeom.Freeze();
-                    dc.DrawGeometry(null, activeCarPen, arrowGeom);
+                    dc.DrawGeometry(null, CarStrokeBluePen, arrowGeom);
                 }
             }
         }
