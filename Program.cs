@@ -72,6 +72,7 @@ namespace VzpenjacaKontrola
         public int CounterViewMode = 0;
         public bool ShowFunicularTrack = true;
         public bool FunicularTrackReversed = false;
+        public int FunicularMotionMode = 1;
         public int RideDurationSec = 90;
         public bool CloudRelayEnabled = true;
         public string CloudRelayServer = "https://vzpenjaca-kontrola-default-rtdb.europe-west1.firebasedatabase.app";
@@ -210,6 +211,12 @@ namespace VzpenjacaKontrola
                         {
                             cfg.FunicularTrackReversed = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
                         }
+                        else if (key.Equals("FunicularMotionMode", StringComparison.OrdinalIgnoreCase))
+                        {
+                            int fmm;
+                            if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out fmm) && (fmm == 0 || fmm == 1))
+                                cfg.FunicularMotionMode = fmm;
+                        }
                         else if (key.Equals("RideDurationSec", StringComparison.OrdinalIgnoreCase))
                         {
                             int rds;
@@ -279,6 +286,7 @@ namespace VzpenjacaKontrola
                 sb.AppendLine("CounterViewMode=" + CounterViewMode.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("ShowFunicularTrack=" + (ShowFunicularTrack ? "true" : "false"));
                 sb.AppendLine("FunicularTrackReversed=" + (FunicularTrackReversed ? "true" : "false"));
+                sb.AppendLine("FunicularMotionMode=" + FunicularMotionMode.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("RideDurationSec=" + RideDurationSec.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("CloudRelayEnabled=" + (CloudRelayEnabled ? "true" : "false"));
                 sb.AppendLine("CloudRelayServer=" + CloudRelayServer);
@@ -1216,6 +1224,63 @@ namespace VzpenjacaKontrola
             {
                 e.Handled = true;
             };
+        }
+
+        /// <summary>
+        /// Maps normalized linear time fraction u in [0, 1] to normalized track distance in [0, 1].
+        /// mode 0: Linear (constant velocity across entire duration)
+        /// mode 1: Graph-based velocity profile (initial creep + acceleration -> constant top speed plateau -> deceleration + station approach creep)
+        /// </summary>
+        public static double ComputeMotionProfilePosition(double linearProgress, int motionMode)
+        {
+            double u = Math.Max(0.0, Math.Min(1.0, linearProgress));
+            if (motionMode == 0)
+            {
+                return u;
+            }
+
+            const double u1 = 0.12;
+            const double u2 = 0.87;
+            const double u3 = 0.96;
+            const double u4 = 0.985;
+
+            const double v0 = 0.07;
+            const double vMax = 0.65;
+            const double vCreep = 0.08;
+
+            const double area1 = 0.5 * (v0 + vMax) * u1;                       // 0.04320
+            const double area2 = area1 + vMax * (u2 - u1);                     // 0.53070
+            const double area3 = area2 + 0.5 * (vMax + vCreep) * (u3 - u2);    // 0.56355
+            const double area4 = area3 + vCreep * (u4 - u3);                   // 0.56555
+            const double totalArea = area4 + 0.5 * vCreep * (1.0 - u4);        // 0.56615
+
+            double dist;
+            if (u <= u1)
+            {
+                dist = v0 * u + 0.5 * (vMax - v0) * (u * u) / u1;
+            }
+            else if (u <= u2)
+            {
+                dist = area1 + vMax * (u - u1);
+            }
+            else if (u <= u3)
+            {
+                double du = u - u2;
+                double w3 = u3 - u2;
+                dist = area2 + vMax * du - 0.5 * (vMax - vCreep) * (du * du) / w3;
+            }
+            else if (u <= u4)
+            {
+                dist = area3 + vCreep * (u - u3);
+            }
+            else
+            {
+                double du = u - u4;
+                double w5 = 1.0 - u4;
+                dist = area4 + vCreep * du - 0.5 * vCreep * (du * du) / w5;
+            }
+
+            return Math.Max(0.0, Math.Min(1.0, dist / totalArea));
         }
 
         public void SetRideState(
@@ -3716,6 +3781,8 @@ namespace VzpenjacaKontrola
         private const int IDM_VIEW_UNDER = 0x1015;
         private const int IDM_SHOW_FUNICULAR_TRACK = 0x1016;
         private const int IDM_FUNICULAR_DIRECTION = 0x1017;
+        private const int IDM_FUNICULAR_MOTION_LINEAR = 0x1018;
+        private const int IDM_FUNICULAR_MOTION_GRAPH = 0x101A;
         private const int IDM_EXIT = 0x1019;
         private const int IDM_VERSION = 0x1020;
 
@@ -4083,6 +4150,14 @@ namespace VzpenjacaKontrola
             }
         }
 
+        public void SetFunicularMotionMode(int mode)
+        {
+            _config.FunicularMotionMode = (mode == 0) ? 0 : 1;
+            _config.Save();
+            SyncFunicularPosition();
+            RefreshSystemMenu();
+        }
+
         private void SyncFunicularPosition()
         {
             if (_funicularTrack == null) return;
@@ -4134,7 +4209,8 @@ namespace VzpenjacaKontrola
 
             if (activeElapsed >= 1L && activeElapsed <= rideDurationMs)
             {
-                double progress = Math.Max(0.0, Math.Min(1.0, (double)activeElapsed / (double)rideDurationMs));
+                double linearProgress = Math.Max(0.0, Math.Min(1.0, (double)activeElapsed / (double)rideDurationMs));
+                double progress = FunicularTrackControl.ComputeMotionProfilePosition(linearProgress, _config.FunicularMotionMode);
                 double pos = isFromSpodnja ? progress : (1.0 - progress);
                 _lastKnownSingleCarPos = pos;
                 _funicularTrack.SetRideState(true, true, isFromSpodnja, pos, activeElapsed, totalSec);
@@ -4230,6 +4306,8 @@ namespace VzpenjacaKontrola
                 uint viewUnderFlag = _config.CounterViewMode == 1 ? MF_CHECKED : MF_UNCHECKED;
                 uint funicularTrackFlag = _config.ShowFunicularTrack ? MF_CHECKED : MF_UNCHECKED;
                 uint funicularDirFlag = _config.FunicularTrackReversed ? MF_CHECKED : MF_UNCHECKED;
+                uint funicularLinearFlag = _config.FunicularMotionMode == 0 ? MF_CHECKED : MF_UNCHECKED;
+                uint funicularGraphFlag = _config.FunicularMotionMode == 1 ? MF_CHECKED : MF_UNCHECKED;
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | topFlag, (UIntPtr)IDM_ALWAYS_ON_TOP, "Vedno na vrhu");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | autostartFlag, (UIntPtr)IDM_START_WITH_WINDOWS, "Zaženi ob zagonu računalnika");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | soundFlag, (UIntPtr)IDM_SOUND_ENABLED, "Zvočna opozorila");
@@ -4241,6 +4319,8 @@ namespace VzpenjacaKontrola
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | viewUnderFlag, (UIntPtr)IDM_VIEW_UNDER, "Prikaz števcev: Pod številko (spodaj)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | funicularTrackFlag, (UIntPtr)IDM_SHOW_FUNICULAR_TRACK, "Prikaz položaja vzpenjače");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | funicularDirFlag, (UIntPtr)IDM_FUNICULAR_DIRECTION, "Obrni smer tirnice (Zgornja ↔ Spodnja)");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | funicularLinearFlag, (UIntPtr)IDM_FUNICULAR_MOTION_LINEAR, "Gibanje vzpenjače: Linearno (čas)");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | funicularGraphFlag, (UIntPtr)IDM_FUNICULAR_MOTION_GRAPH, "Gibanje vzpenjače: Po grafu (pospešek)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_IN, "Povečaj števce\t(Ctrl +)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_ZOOM_OUT, "Pomanjšaj števce\t(Ctrl -)");
@@ -4311,6 +4391,8 @@ namespace VzpenjacaKontrola
                 Forms.MenuItem mnuViewUnder = new Forms.MenuItem("Prikaz števcev: Pod številko", (s, e) => SetCounterViewMode(1));
                 Forms.MenuItem mnuFunicularTrack = new Forms.MenuItem("Prikaz položaja vzpenjače", (s, e) => ToggleFunicularTrack());
                 Forms.MenuItem mnuFunicularDir = new Forms.MenuItem("Obrni smer tirnice (Zgornja ↔ Spodnja)", (s, e) => ToggleFunicularDirection());
+                Forms.MenuItem mnuFunicularMotionLinear = new Forms.MenuItem("Gibanje vzpenjače: Linearno (čas)", (s, e) => SetFunicularMotionMode(0));
+                Forms.MenuItem mnuFunicularMotionGraph = new Forms.MenuItem("Gibanje vzpenjače: Po grafu (pospešek)", (s, e) => SetFunicularMotionMode(1));
                 Forms.MenuItem mnuExit = new Forms.MenuItem("Izhod", (s, e) => ExitApplication());
 
                 trayMenu.Popup += (s, e) =>
@@ -4322,6 +4404,10 @@ namespace VzpenjacaKontrola
                     mnuFunicularTrack.Checked = _config.ShowFunicularTrack;
                     mnuFunicularDir.Checked = _config.FunicularTrackReversed;
                     mnuFunicularDir.Enabled = _config.ShowFunicularTrack;
+                    mnuFunicularMotionLinear.Checked = (_config.FunicularMotionMode == 0);
+                    mnuFunicularMotionGraph.Checked = (_config.FunicularMotionMode == 1);
+                    mnuFunicularMotionLinear.Enabled = _config.ShowFunicularTrack;
+                    mnuFunicularMotionGraph.Enabled = _config.ShowFunicularTrack;
                 };
 
                 trayMenu.MenuItems.Add(mnuOpen);
@@ -4333,6 +4419,8 @@ namespace VzpenjacaKontrola
                 trayMenu.MenuItems.Add(mnuViewUnder);
                 trayMenu.MenuItems.Add(mnuFunicularTrack);
                 trayMenu.MenuItems.Add(mnuFunicularDir);
+                trayMenu.MenuItems.Add(mnuFunicularMotionLinear);
+                trayMenu.MenuItems.Add(mnuFunicularMotionGraph);
                 trayMenu.MenuItems.Add("-");
                 trayMenu.MenuItems.Add(mnuExit);
 
@@ -4527,6 +4615,16 @@ namespace VzpenjacaKontrola
                 else if (cmd == IDM_FUNICULAR_DIRECTION)
                 {
                     ToggleFunicularDirection();
+                    handled = true;
+                }
+                else if (cmd == IDM_FUNICULAR_MOTION_LINEAR)
+                {
+                    SetFunicularMotionMode(0);
+                    handled = true;
+                }
+                else if (cmd == IDM_FUNICULAR_MOTION_GRAPH)
+                {
+                    SetFunicularMotionMode(1);
                     handled = true;
                 }
                 else if (cmd == IDM_ZOOM_IN)

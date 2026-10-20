@@ -119,6 +119,7 @@ class MobileConfig(private val context: Context) {
     var showIntervalBgZgoraj: Boolean = true
     var showIntervalBgSpodaj: Boolean = true
     var rideDurationSec: Int = 90
+    var funicularMotionMode: Int = 1 // 0 = Linear, 1 = Graph-based (acceleration/deceleration)
     var autoLockTimeoutSec: Int = 0 // 0 = unlocked until manually locked; >0 = auto-lock after N seconds
 
     init {
@@ -158,6 +159,10 @@ class MobileConfig(private val context: Context) {
         if (prefs.contains("showIntervalBgZgoraj")) showIntervalBgZgoraj = prefs.getBoolean("showIntervalBgZgoraj", true)
         if (prefs.contains("showIntervalBgSpodaj")) showIntervalBgSpodaj = prefs.getBoolean("showIntervalBgSpodaj", true)
         if (prefs.contains("rideDurationSec")) rideDurationSec = prefs.getInt("rideDurationSec", 90).coerceIn(10, 600)
+        if (prefs.contains("funicularMotionMode")) {
+            val m = prefs.getInt("funicularMotionMode", 1)
+            funicularMotionMode = if (m == 0) 0 else 1
+        }
         if (prefs.contains("autoLockTimeoutSec")) {
             val v = prefs.getInt("autoLockTimeoutSec", 0)
             autoLockTimeoutSec = if (v in listOf(0, 5, 10, 15, 30, 60)) v else 0
@@ -232,6 +237,7 @@ class MobileConfig(private val context: Context) {
             .putBoolean("showIntervalBgZgoraj", showIntervalBgZgoraj)
             .putBoolean("showIntervalBgSpodaj", showIntervalBgSpodaj)
             .putInt("rideDurationSec", rideDurationSec.coerceIn(10, 600))
+            .putInt("funicularMotionMode", if (funicularMotionMode == 0) 0 else 1)
             .putInt("autoLockTimeoutSec", autoLockTimeoutSec)
             .apply()
     }
@@ -1456,6 +1462,7 @@ class MainActivity : Activity() {
 
         // Separate Zgornja postaja and Spodnja postaja views (one view fits screen, swipe up/down to switch)
         StationCardView.rideDurationSec = config.rideDurationSec
+        StationCardView.funicularMotionMode = config.funicularMotionMode
         cardZgoraj = StationCardView(
             context = this,
             stationId = "zgoraj",
@@ -2610,6 +2617,59 @@ class MainActivity : Activity() {
         })
         updatePresetHighlight()
         rideCard.addView(presetRow)
+
+        var selectedMotionMode = config.funicularMotionMode
+        rideCard.addView(createSettingsLabel("Način prikaza položaja kabine:"))
+        val motionSegmentRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(9).toFloat()
+                setColor(ThemeColors.SubCardBg)
+                setStroke(dp(1), ThemeColors.Divider)
+            }
+            setPadding(dp(3), dp(3), dp(3), dp(3))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(4)
+            }
+        }
+        val btnMotionLinear = TextView(this).apply {
+            text = "Linearno (čas)"
+            gravity = Gravity.CENTER
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val btnMotionGraph = TextView(this).apply {
+            text = "Po grafu (pospešek)"
+            gravity = Gravity.CENTER
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        fun updateMotionModeUi() {
+            styleSegmentTab(btnMotionLinear, selectedMotionMode == 0)
+            styleSegmentTab(btnMotionGraph, selectedMotionMode == 1)
+        }
+        btnMotionLinear.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            selectedMotionMode = 0
+            updateMotionModeUi()
+        }
+        btnMotionGraph.setOnClickListener {
+            it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            selectedMotionMode = 1
+            updateMotionModeUi()
+        }
+        updateMotionModeUi()
+        motionSegmentRow.addView(btnMotionLinear)
+        motionSegmentRow.addView(btnMotionGraph)
+        rideCard.addView(motionSegmentRow)
+
         container.addView(rideCard)
 
         // =========================================================================
@@ -2871,8 +2931,10 @@ class MainActivity : Activity() {
 
             val parsedDuration = edtRideDuration.text.toString().trim().toIntOrNull() ?: 90
             config.rideDurationSec = parsedDuration.coerceIn(10, 600)
+            config.funicularMotionMode = selectedMotionMode
             config.autoLockTimeoutSec = selectedAutoLockSec
             StationCardView.rideDurationSec = config.rideDurationSec
+            StationCardView.funicularMotionMode = config.funicularMotionMode
             cardZgoraj.syncSingleFunicularPosition()
             cardSpodaj.syncSingleFunicularPosition()
 
@@ -4275,7 +4337,8 @@ class StationCardView(
         val isFromSpodnja = (activeStationId == "spodaj")
 
         if (activeElapsed in 1L..rideDurationMs) {
-            val progress = (activeElapsed.toFloat() / rideDurationMs.toFloat()).coerceIn(0f, 1f)
+            val linearProgress = (activeElapsed.toFloat() / rideDurationMs.toFloat()).coerceIn(0f, 1f)
+            val progress = computeMotionProfilePosition(linearProgress, funicularMotionMode)
             // Departure from Spodnja: 0.0 (Spodnja) -> 1.0 (Zgornja)
             // Departure from Zgornja: 1.0 (Zgornja) -> 0.0 (Spodnja)
             val pos = if (isFromSpodnja) progress else (1f - progress)
@@ -4301,9 +4364,51 @@ class StationCardView(
         @Volatile
         var rideDurationSec: Int = 90
         @Volatile
+        var funicularMotionMode: Int = 1 // 0 = Linear, 1 = Graph-based (acc/dec)
+        @Volatile
         private var lastDepartedStationId: String = "zgoraj"
         @Volatile
         private var lastKnownSingleCarPos: Float = 0f
+
+        fun computeMotionProfilePosition(linearProgress: Float, motionMode: Int): Float {
+            val u = linearProgress.coerceIn(0f, 1f).toDouble()
+            if (motionMode == 0) {
+                return u.toFloat()
+            }
+
+            val u1 = 0.12
+            val u2 = 0.87
+            val u3 = 0.96
+            val u4 = 0.985
+
+            val v0 = 0.07
+            val vMax = 0.65
+            val vCreep = 0.08
+
+            val area1 = 0.5 * (v0 + vMax) * u1
+            val area2 = area1 + vMax * (u2 - u1)
+            val area3 = area2 + 0.5 * (vMax + vCreep) * (u3 - u2)
+            val area4 = area3 + vCreep * (u4 - u3)
+            val totalArea = area4 + 0.5 * vCreep * (1.0 - u4)
+
+            val dist = when {
+                u <= u1 -> v0 * u + 0.5 * (vMax - v0) * (u * u) / u1
+                u <= u2 -> area1 + vMax * (u - u1)
+                u <= u3 -> {
+                    val du = u - u2
+                    val w3 = u3 - u2
+                    area2 + vMax * du - 0.5 * (vMax - vCreep) * (du * du) / w3
+                }
+                u <= u4 -> area3 + vCreep * (u - u3)
+                else -> {
+                    val du = u - u4
+                    val w5 = 1.0 - u4
+                    area4 + vCreep * du - 0.5 * vCreep * (du * du) / w5
+                }
+            }
+
+            return (dist / totalArea).coerceIn(0.0, 1.0).toFloat()
+        }
     }
 
     private fun renderPersons(suppressChime: Boolean) {
