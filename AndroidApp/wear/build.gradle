@@ -1,0 +1,40 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'si.vzpenjaca.kontrola.wear'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "si.vzpenjaca.kontrola.wear"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.2.3"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    implementation 'androidx.wear.tiles:tiles:1.4.0'
+    implementation 'androidx.wear.protolayout:protolayout:1.2.0'
+    implementation 'androidx.wear.protolayout:protolayout-material:1.2.0'
+    implementation 'com.google.guava:guava:31.1-android'
+    implementation 'androidx.concurrent:concurrent-futures:1.2.0'
+}

@@ -8,4 +8,5 @@ obj/
 AndroidApp/.gradle/
 AndroidApp/build/
 AndroidApp/app/build/
+AndroidApp/wear/build/
 AndroidApp/local.properties

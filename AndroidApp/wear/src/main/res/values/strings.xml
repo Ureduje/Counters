@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Kontrola pristopa</string>
+    <string name="tile_time_label">Vzpenjača: Čas odhoda</string>
+    <string name="tile_time_desc">Odštevalnik časa vzpenjače in preklop 6 min / 10 min</string>
+    <string name="tile_persons_label">Vzpenjača: Število oseb</string>
+    <string name="tile_persons_desc">Kapaciteta vzpenjače in štetje oseb (+1, -1)</string>
+</resources>

@@ -39,3 +39,16 @@ V mapi [`AndroidApp/`](./AndroidApp) je izvorna koda namenske Android aplikacije
   - **Oblačnim mostom (`CloudRelay`)**: V realnem času sprejema telemetrijo obeh postaj iz PC aplikacije [`VzpenjacaKontrola.exe`](./VzpenjacaKontrola.exe) in pošilja operaterske ukaze (`10 min`, `6 min`, `+1 min`, `-1 min`, `+5 min`, `-5 min`, `+1 oseba`, `-1 oseba`, `Ponastavi števec`).
   - **Neposrednim LAN načinom (`DirectLanFunicularClient`)**: Možnost preklopa v nastavitvah na neposredno surovo TCP komunikacijo s krmilnikoma `10.12.220.34` in `10.12.220.36`, kadar je telefon povezan na službeni Wi-Fi ali VPN.
   - **Enakim temnim vmesnikom in sintetiziranimi zvočnimi opozorili (`MobileChimePlayer`)** kot namizna aplikacija.
+
+## Aplikacija za pametne ure Wear OS (`AndroidApp/wear/`)
+
+Namenska aplikacija za pametne ure Wear OS (npr. Samsung Galaxy Watch, Pixel Watch) z dvema ploščicama (Tiles/Widgets) za vrtiljak ure in celozaslonsko aplikacijo:
+
+- [`VzpenjacaKontrola-Wear.apk`](./VzpenjacaKontrola-Wear.apk) — Samostojni namestitveni paket za Wear OS pametne ure.
+- **2 pripomočka / ploščici (Wear OS Tiles):**
+  1. **Čas odhoda (`TimeCountdownTileService`)**: Prikaz odštevanja časa do odhoda (`MM:SS`), intervala in tipk za preklop `6 min` / `10 min`.
+  2. **Število oseb (`PersonsCapacityTileService`)**: Prikaz števila oseb in kapacitete (`trenutno / max`) ter tipk `− 1` in `+ 1`.
+- **Glavna aplikacija za uro ([`WearMainActivity.kt`](./AndroidApp/wear/src/main/java/si/vzpenjaca/kontrola/wear/WearMainActivity.kt)):**
+  - **Zaslon 1:** Odštevalnik časa s preklopom `6 min` / `10 min` in animacijo vožnje kabine vzpenjače na tirih v realnem času.
+  - **Zaslon 2:** Števec oseb s tipkama `− 1` in `+ 1` ter ponastavitvijo ob dolgem pritisku.
+  - **Zaslon 3:** Nastavitve (enake kot v mobilni aplikaciji: Oblačni most / LAN, PIN, samodejni zaklep tipk, zvoki in slovenski govor ob odhodu).
