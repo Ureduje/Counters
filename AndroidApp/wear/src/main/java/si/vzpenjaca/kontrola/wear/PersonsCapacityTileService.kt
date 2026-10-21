@@ -39,6 +39,7 @@ class PersonsCapacityTileService : TileService() {
                         ActionBuilders.AndroidActivity.Builder()
                             .setPackageName(packageName)
                             .setClassName("si.vzpenjaca.kontrola.wear.WearMainActivity")
+                            .addKeyToExtraMapping("target_page", ActionBuilders.intExtra(1))
                             .build()
                     )
                     .build()

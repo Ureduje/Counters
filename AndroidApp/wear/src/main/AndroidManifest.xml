@@ -20,7 +20,7 @@
         android:label="Kontrola pristopa"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
-        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+        android:theme="@style/WearAppTheme">
 
         <meta-data
             android:name="com.google.android.wearable.standalone"

@@ -5,4 +5,9 @@
     <string name="tile_time_desc">Odštevalnik časa vzpenjače in preklop 6 min / 10 min</string>
     <string name="tile_persons_label">Vzpenjača: Število oseb</string>
     <string name="tile_persons_desc">Kapaciteta vzpenjače in štetje oseb (+1, -1)</string>
+
+    <style name="WearAppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowSwipeToDismiss">false</item>
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
 </resources>

@@ -1561,6 +1561,7 @@ namespace VzpenjacaKontrola
         private long _remainingMs = 0;
         private long _setMs = 0;
         private long _plcExcessRemMs = 0;
+        private DateTime _lastCountdownTickUtc = DateTime.MinValue;
         private bool _hasRideOrigin = false;
         private DateTime _rideOriginUtc = DateTime.MinValue;
         private DateTime _lastTimeframeCommandUtc = DateTime.MinValue;
@@ -2242,11 +2243,23 @@ namespace VzpenjacaKontrola
             _countdownTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
             _countdownTimer.Tick += (s, e) =>
             {
+                DateTime nowUtc = DateTime.UtcNow;
+                long deltaMs = 200L;
+                if (_lastCountdownTickUtc != DateTime.MinValue)
+                {
+                    long elapsed = (long)(nowUtc - _lastCountdownTickUtc).TotalMilliseconds;
+                    if (elapsed >= 1L && elapsed <= 2000L)
+                    {
+                        deltaMs = elapsed;
+                    }
+                }
+                _lastCountdownTickUtc = nowUtc;
+
                 if (_isOnline)
                 {
                     if (_remainingMs > 0)
                     {
-                        _remainingMs = Math.Max(0, _remainingMs - 200);
+                        _remainingMs = Math.Max(0, _remainingMs - deltaMs);
                         RenderTime();
                     }
                     else if (StateTicked != null)
@@ -2643,12 +2656,13 @@ namespace VzpenjacaKontrola
                 effectiveRemMs = Math.Max(0L, t.RemainingTimeMs);
             }
 
-            bool timeJump = Math.Abs(effectiveRemMs - _remainingMs) > 2500;
+            bool timeJump = Math.Abs(effectiveRemMs - _remainingMs) > 1500;
 
             _setMs = t.SetTimeMs;
-            if (forceSyncTime || wasOffline || Math.Abs(effectiveRemMs - _remainingMs) > 2000)
+            if (forceSyncTime || wasOffline || timeJump)
             {
                 _remainingMs = effectiveRemMs;
+                _lastCountdownTickUtc = DateTime.UtcNow;
             }
             if (_setMs > 0 && _remainingMs > _setMs)
             {

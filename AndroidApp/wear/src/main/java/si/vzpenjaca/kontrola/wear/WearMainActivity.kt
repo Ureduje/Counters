@@ -70,6 +70,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
@@ -1259,18 +1260,23 @@ object DirectLanFunicularClient {
             var attempts = 0
             while (abs(t.setTimeMs - targetSetMs) >= 7500L && attempts < 30) {
                 attempts++
+                val prevStepSetMs = t.setTimeMs
                 val diff = targetSetMs - t.setTimeMs
                 val adjCmd = when {
-                    diff >= 210000L -> 3
-                    diff <= -210000L -> 6
-                    diff >= 37500L -> 2
-                    diff <= -37500L -> 5
+                    diff >= 292500L -> 3
+                    diff <= -292500L -> 6
+                    diff >= 52500L -> 2
+                    diff <= -52500L -> 5
                     diff > 0L -> 1
                     else -> 4
                 }
                 Thread.sleep(45)
                 try {
                     t = sendCommand(host, 80, adjCmd, 1500)
+                    if (abs(t.setTimeMs - prevStepSetMs) < 5000L) {
+                        Thread.sleep(70)
+                        t = sendCommand(host, 80, 0, 1500)
+                    }
                 } catch (_: Throwable) {
                     Thread.sleep(120)
                 }
@@ -1346,8 +1352,12 @@ class StationTelemetryTracker(
         val prevPersons = currentPersons
 
         setMs = state.setTimeMs
-        if (forceSyncTime || wasOffline || abs(state.remainingTimeMs - remainingMs) > 2000L) {
-            remainingMs = state.remainingTimeMs
+        val clampedRemMs = if (setMs > 0L) min(state.remainingTimeMs, setMs) else state.remainingTimeMs
+        if (forceSyncTime || wasOffline || abs(clampedRemMs - remainingMs) > 1500L) {
+            remainingMs = clampedRemMs
+        }
+        if (setMs > 0L && remainingMs > setMs) {
+            remainingMs = setMs
         }
         currentPersons = state.currentPersons
         maxPersons = state.maxPersons
@@ -1426,10 +1436,13 @@ class WearMainActivity : Activity() {
     // By default controls are locked (view only) to prevent accidental wrist touches
     private var isControlsLocked: Boolean = true
 
-    private lateinit var pager: WearVerticalPager
+    private lateinit var rootContainer: FrameLayout
+    private lateinit var pager: Wear2DPager
     private lateinit var timeWidgetPage: TimeWidgetPage
     private lateinit var personsWidgetPage: PersonsWidgetPage
-    private lateinit var settingsScrollView: ScrollView
+    private lateinit var settingsContainer: FrameLayout
+    private var settingsScrollView: ScrollView? = null
+    private var isSettingsOpen: Boolean = false
 
     private val streamActive = AtomicBoolean(false)
     @Volatile
@@ -1439,6 +1452,12 @@ class WearMainActivity : Activity() {
     @Volatile
     private var lastAppliedStateTs: Long = 0L
     @Volatile
+    private var initialCachedStateTs: Long = 0L
+    @Volatile
+    private var pcClockOffsetMs: Long = 0L
+    @Volatile
+    private var hasPcClockOffset: Boolean = false
+    @Volatile
     private var lanZgorajOnline: Boolean = false
     @Volatile
     private var lanSpodajOnline: Boolean = false
@@ -1446,16 +1465,21 @@ class WearMainActivity : Activity() {
     private var lastDepartedStationId: String = "zgoraj"
     @Volatile
     private var lastKnownSingleCarPos: Float = 0f
+    private var lastTickRealtimeMs: Long = 0L
+    private var lastTileSyncSignature: String = ""
 
     private val tickRunnable = object : Runnable {
         override fun run() {
-            trackerZgoraj.onLocalTick(200L)
-            trackerSpodaj.onLocalTick(200L)
+            val now = SystemClock.elapsedRealtime()
+            val deltaMs = if (lastTickRealtimeMs > 0L) (now - lastTickRealtimeMs).coerceIn(1L, 2000L) else 200L
+            lastTickRealtimeMs = now
+
+            trackerZgoraj.onLocalTick(deltaMs)
+            trackerSpodaj.onLocalTick(deltaMs)
             refreshWidgetsUi()
 
             if (config.useCloudRelay) {
-                val now = SystemClock.elapsedRealtime()
-                if (now - lastCloudSyncSendMs > 90_000L) {
+                if (now - lastCloudSyncSendMs > 45_000L) {
                     requestCloudSync()
                 }
             }
@@ -1497,11 +1521,12 @@ class WearMainActivity : Activity() {
         trackerZgoraj = StationTelemetryTracker("zgoraj", config.muteZgoraj, config.dimZgoraj)
         trackerSpodaj = StationTelemetryTracker("spodaj", config.muteSpodaj, config.dimSpodaj)
 
-        // Page 1: Time Countdown Widget (6min / 10min switch + funicular track)
+        // Page 0 (Left): Time Countdown Widget (6min / 10min switch + funicular track)
         timeWidgetPage = TimeWidgetPage(
             context = this,
             onToggleStation = { toggleActiveStation() },
             onToggleLock = { applyControlsLockState(!isControlsLocked) },
+            onOpenSettings = { openSettingsPage() },
             onToggleShowInterval = {
                 if (!isControlsLocked) {
                     if (activeStationIndex == 0) {
@@ -1519,11 +1544,12 @@ class WearMainActivity : Activity() {
             }
         )
 
-        // Page 2: Persons / Capacity Widget (+1, -1 + long-press counter to reset)
+        // Page 1 (Right): Persons / Capacity Widget (+1, -1 + long-press counter to reset)
         personsWidgetPage = PersonsWidgetPage(
             context = this,
             onToggleStation = { toggleActiveStation() },
             onToggleLock = { applyControlsLockState(!isControlsLocked) },
+            onOpenSettings = { openSettingsPage() },
             onToggleShowCapacity = {
                 if (!isControlsLocked) {
                     if (activeStationIndex == 0) {
@@ -1547,34 +1573,59 @@ class WearMainActivity : Activity() {
             }
         )
 
-        // Page 3: Settings (same settings as mobile app, adapted for watch screen)
-        settingsScrollView = buildSettingsPage()
-
-        pager = WearVerticalPager(
+        pager = Wear2DPager(
             context = this,
             page0 = timeWidgetPage,
             page1 = personsWidgetPage,
-            page2 = settingsScrollView
+            getStationIndex = { activeStationIndex },
+            onSwitchStation = { targetStationIndex ->
+                setStationIndex(targetStationIndex)
+            }
         )
+
+        settingsContainer = FrameLayout(this).apply {
+            setBackgroundColor(ThemeColors.WindowBg)
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        rootContainer = FrameLayout(this).apply {
+            setBackgroundColor(ThemeColors.WindowBg)
+            addView(
+                pager,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+            addView(settingsContainer)
+        }
 
         applyControlsLockState(isControlsLocked)
         val savedStation = getSharedPreferences("vzpenjaca_prefs", Context.MODE_PRIVATE)
             .getString("active_station", "zgoraj") ?: "zgoraj"
         activeStationIndex = if (savedStation.equals("spodaj", ignoreCase = true)) 1 else 0
         refreshWidgetsUi()
-        setContentView(pager)
+        setContentView(rootContainer)
         handleTargetPageIntent(intent)
 
         // Support rotary crown / bezel scrolling on Wear OS
-        pager.isFocusable = true
-        pager.isFocusableInTouchMode = true
-        pager.requestFocus()
-        pager.setOnGenericMotionListener { _, event ->
+        rootContainer.isFocusable = true
+        rootContainer.isFocusableInTouchMode = true
+        rootContainer.requestFocus()
+        rootContainer.setOnGenericMotionListener { _, event ->
             if (event.action == MotionEvent.ACTION_SCROLL &&
                 event.isFromSource(InputDevice.SOURCE_ROTARY_ENCODER)
             ) {
                 val delta = -event.getAxisValue(MotionEvent.AXIS_SCROLL)
-                pager.onRotaryScroll(delta)
+                if (isSettingsOpen) {
+                    settingsScrollView?.smoothScrollBy(0, (delta * dp(28)).roundToInt())
+                } else {
+                    pager.onRotaryScroll(delta)
+                }
                 true
             } else {
                 false
@@ -1588,11 +1639,59 @@ class WearMainActivity : Activity() {
         handleTargetPageIntent(intent)
     }
 
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (isSettingsOpen) {
+            closeSettingsPage()
+        } else {
+            super.onBackPressed()
+        }
+    }
+
+    private fun openSettingsPage() {
+        if (isSettingsOpen) return
+        isSettingsOpen = true
+        val scroll = buildSettingsPage()
+        settingsScrollView = scroll
+        settingsContainer.removeAllViews()
+        settingsContainer.addView(
+            scroll,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        settingsContainer.alpha = 0f
+        settingsContainer.visibility = View.VISIBLE
+        settingsContainer.animate()
+            .alpha(1f)
+            .setDuration(150L)
+            .start()
+    }
+
+    private fun closeSettingsPage() {
+        if (!isSettingsOpen) return
+        isSettingsOpen = false
+        settingsContainer.animate()
+            .alpha(0f)
+            .setDuration(130L)
+            .withEndAction {
+                settingsContainer.visibility = View.GONE
+                settingsContainer.removeAllViews()
+                settingsScrollView = null
+                rootContainer.requestFocus()
+            }
+            .start()
+    }
+
     private fun handleTargetPageIntent(intent: android.content.Intent?) {
         if (intent == null) return
         val page = intent.getIntExtra("target_page", -1)
-        if (page in 0..2) {
-            pager.switchToPage(page)
+        if (page == 2) {
+            openSettingsPage()
+        } else if (page in 0..1) {
+            if (isSettingsOpen) closeSettingsPage()
+            pager.switchToPage(page, animate = false)
         }
         val station = intent.getStringExtra("target_station")
         if (station != null) {
@@ -1603,6 +1702,7 @@ class WearMainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        lastTickRealtimeMs = SystemClock.elapsedRealtime()
         uiHandler.removeCallbacks(tickRunnable)
         uiHandler.post(tickRunnable)
         scheduleAutoLockIfNeeded()
@@ -1622,8 +1722,10 @@ class WearMainActivity : Activity() {
     private fun activeTracker(): StationTelemetryTracker =
         if (activeStationIndex == 0) trackerZgoraj else trackerSpodaj
 
-    private fun toggleActiveStation() {
-        activeStationIndex = if (activeStationIndex == 0) 1 else 0
+    private fun setStationIndex(targetIndex: Int) {
+        val clamped = if (targetIndex == 1) 1 else 0
+        if (activeStationIndex == clamped) return
+        activeStationIndex = clamped
         getSharedPreferences("vzpenjaca_prefs", Context.MODE_PRIVATE)
             .edit()
             .putString("active_station", if (activeStationIndex == 0) "zgoraj" else "spodaj")
@@ -1631,6 +1733,15 @@ class WearMainActivity : Activity() {
         TimeCountdownTileService.requestUpdate(this)
         PersonsCapacityTileService.requestUpdate(this)
         refreshWidgetsUi()
+    }
+
+    private fun toggleActiveStation() {
+        val nextStation = if (activeStationIndex == 0) 1 else 0
+        if (::pager.isInitialized) {
+            pager.animateStationSwitch(nextStation)
+        } else {
+            setStationIndex(nextStation)
+        }
     }
 
     private fun scheduleAutoLockIfNeeded() {
@@ -1668,21 +1779,27 @@ class WearMainActivity : Activity() {
         )
         syncSingleFunicularPosition()
 
-        TileSyncHelper.saveTelemetry(
-            this@WearMainActivity,
-            zOnline = trackerZgoraj.isOnline,
-            zRemMs = trackerZgoraj.remainingMs,
-            zSetMs = trackerZgoraj.setMs,
-            zCur = trackerZgoraj.currentPersons,
-            zMax = trackerZgoraj.maxPersons,
-            sOnline = trackerSpodaj.isOnline,
-            sRemMs = trackerSpodaj.remainingMs,
-            sSetMs = trackerSpodaj.setMs,
-            sCur = trackerSpodaj.currentPersons,
-            sMax = trackerSpodaj.maxPersons
-        )
-        TimeCountdownTileService.requestUpdate(this@WearMainActivity)
-        PersonsCapacityTileService.requestUpdate(this@WearMainActivity)
+        val zSec = (max(0L, trackerZgoraj.remainingMs) + 499L) / 1000L
+        val sSec = (max(0L, trackerSpodaj.remainingMs) + 499L) / 1000L
+        val tileSig = "$activeStationIndex:${trackerZgoraj.isOnline}:$zSec:${trackerZgoraj.setMs}:${trackerZgoraj.currentPersons}:${trackerZgoraj.maxPersons}|${trackerSpodaj.isOnline}:$sSec:${trackerSpodaj.setMs}:${trackerSpodaj.currentPersons}:${trackerSpodaj.maxPersons}"
+        if (tileSig != lastTileSyncSignature) {
+            lastTileSyncSignature = tileSig
+            TileSyncHelper.saveTelemetry(
+                this@WearMainActivity,
+                zOnline = trackerZgoraj.isOnline,
+                zRemMs = trackerZgoraj.remainingMs,
+                zSetMs = trackerZgoraj.setMs,
+                zCur = trackerZgoraj.currentPersons,
+                zMax = trackerZgoraj.maxPersons,
+                sOnline = trackerSpodaj.isOnline,
+                sRemMs = trackerSpodaj.remainingMs,
+                sSetMs = trackerSpodaj.setMs,
+                sCur = trackerSpodaj.currentPersons,
+                sMax = trackerSpodaj.maxPersons
+            )
+            TimeCountdownTileService.requestUpdate(this@WearMainActivity)
+            PersonsCapacityTileService.requestUpdate(this@WearMainActivity)
+        }
     }
 
     private fun syncSingleFunicularPosition() {
@@ -1906,13 +2023,13 @@ class WearMainActivity : Activity() {
         uiHandler.removeCallbacks(lanPollRunnable)
         stopCloudStream()
         lastAppliedStateTs = 0L
+        initialCachedStateTs = 0L
         lanZgorajOnline = false
         lanSpodajOnline = false
 
         if (config.useCloudRelay) {
             startCloudStream()
-            requestCloudSync()
-            uiHandler.postDelayed({ fetchLatestCachedCloudState() }, 700L)
+            uiHandler.postDelayed({ fetchLatestCachedCloudState() }, 900L)
         } else {
             uiHandler.post(lanPollRunnable)
         }
@@ -1949,6 +2066,7 @@ class WearMainActivity : Activity() {
                     val state = DirectLanFunicularClient.executeComplexCommand(ip, cmdId)
                     if (station == "zgoraj") lanZgorajOnline = true else lanSpodajOnline = true
                     uiHandler.post {
+                        lastTickRealtimeMs = SystemClock.elapsedRealtime()
                         val departed = targetTracker.applyState(state, forceSyncTime = true, isCachedState = false)
                         if (departed) lastDepartedStationId = station
                         refreshWidgetsUi()
@@ -1970,6 +2088,7 @@ class WearMainActivity : Activity() {
                 val stZ = DirectLanFunicularClient.sendCommand(config.ipZgoraj, 80, 0, 1800)
                 lanZgorajOnline = true
                 uiHandler.post {
+                    lastTickRealtimeMs = SystemClock.elapsedRealtime()
                     if (trackerZgoraj.applyState(stZ, forceSyncTime, isCachedState = false)) {
                         lastDepartedStationId = "zgoraj"
                     }
@@ -1988,6 +2107,7 @@ class WearMainActivity : Activity() {
                 val stS = DirectLanFunicularClient.sendCommand(config.ipSpodaj, 80, 0, 1800)
                 lanSpodajOnline = true
                 uiHandler.post {
+                    lastTickRealtimeMs = SystemClock.elapsedRealtime()
                     if (trackerSpodaj.applyState(stS, forceSyncTime, isCachedState = false)) {
                         lastDepartedStationId = "spodaj"
                     }
@@ -2073,6 +2193,10 @@ class WearMainActivity : Activity() {
                     }
                     activeStreamConnection = conn
 
+                    if (!isFirebase) {
+                        requestCloudSync()
+                    }
+
                     BufferedReader(InputStreamReader(conn.inputStream, StandardCharsets.UTF_8)).use { reader ->
                         var currentSseEvent = ""
                         var isFirstFirebasePut = true
@@ -2093,8 +2217,20 @@ class WearMainActivity : Activity() {
                                         val wrapper = JSONObject(dataStr)
                                         val dataObj = wrapper.optJSONObject("data")
                                         if (dataObj != null) {
-                                            applyCloudStatePayload(dataObj.toString(), fromCache = isFirstFirebasePut)
+                                            val wasFirstPut = isFirstFirebasePut
                                             isFirstFirebasePut = false
+                                            if (wasFirstPut) {
+                                                val ts = dataObj.optLong("ts", 0L)
+                                                if (initialCachedStateTs == 0L && ts > 0L) {
+                                                    initialCachedStateTs = ts
+                                                }
+                                            }
+                                            applyCloudStatePayload(dataObj.toString(), fromCache = wasFirstPut)
+                                            if (wasFirstPut) {
+                                                // Request live sync from PC AFTER SSE stream is connected so the
+                                                // PC's fresh publish arrives as a live (fromCache = false) SSE event.
+                                                requestCloudSync()
+                                            }
                                         }
                                     }
                                 }
@@ -2142,9 +2278,10 @@ class WearMainActivity : Activity() {
     private fun sendCloudCommand(station: String, cmdId: Int): Boolean {
         var conn: HttpURLConnection? = null
         return try {
-            val nowMs = System.currentTimeMillis()
+            val rawNowMs = System.currentTimeMillis()
+            val nowMs = if (hasPcClockOffset) (rawNowMs - pcClockOffsetMs) else rawNowMs
             val payload = JSONObject().apply {
-                put("id", "$nowMs-${(1000..9999).random()}")
+                put("id", "$rawNowMs-${(1000..9999).random()}")
                 put("station", station)
                 put("cmd", cmdId)
                 put("pin", config.cloudPin)
@@ -2187,12 +2324,29 @@ class WearMainActivity : Activity() {
             if (fromCache && msgTs > 0L && msgTs <= lastAppliedStateTs) {
                 return
             }
-            val ageMs = if (fromCache && msgTs > 0L) {
-                (System.currentTimeMillis() - msgTs).coerceAtLeast(0L)
+
+            // If this payload has a newer timestamp than the initial cached snapshot, it was just
+            // published live by the PC (e.g. in response to requestCloudSync or an operator command).
+            val isLiveUpdate = !fromCache || (initialCachedStateTs > 0L && msgTs > initialCachedStateTs)
+            if (isLiveUpdate && msgTs > 0L) {
+                pcClockOffsetMs = System.currentTimeMillis() - msgTs
+                hasPcClockOffset = true
+            }
+
+            val ageMs = if (!isLiveUpdate && msgTs > 0L) {
+                if (hasPcClockOffset) {
+                    val pcNowMs = System.currentTimeMillis() - pcClockOffsetMs
+                    (pcNowMs - msgTs).coerceAtLeast(0L)
+                } else {
+                    val rawAge = (System.currentTimeMillis() - msgTs).coerceAtLeast(0L)
+                    // Avoid subtracting small wall-clock skew (~5s) on initial cached state
+                    // right before the live sync response arrives from the PC.
+                    if (rawAge < 8_000L) 0L else rawAge
+                }
             } else {
                 0L
             }
-            if (fromCache && ageMs > 15 * 60 * 1000L) {
+            if (!isLiveUpdate && ageMs > 15 * 60 * 1000L) {
                 return
             }
             if (msgTs > lastAppliedStateTs) {
@@ -2215,8 +2369,9 @@ class WearMainActivity : Activity() {
             )
 
             uiHandler.post {
+                lastTickRealtimeMs = SystemClock.elapsedRealtime()
                 if (zState.isOnline) {
-                    if (trackerZgoraj.applyState(zState, forceSyncTime = true, isCachedState = fromCache)) {
+                    if (trackerZgoraj.applyState(zState, forceSyncTime = true, isCachedState = !isLiveUpdate)) {
                         lastDepartedStationId = "zgoraj"
                     }
                 } else {
@@ -2224,7 +2379,7 @@ class WearMainActivity : Activity() {
                 }
 
                 if (sState.isOnline) {
-                    if (trackerSpodaj.applyState(sState, forceSyncTime = true, isCachedState = fromCache)) {
+                    if (trackerSpodaj.applyState(sState, forceSyncTime = true, isCachedState = !isLiveUpdate)) {
                         lastDepartedStationId = "spodaj"
                     }
                 } else {
@@ -2272,15 +2427,22 @@ class WearMainActivity : Activity() {
             setPadding(dp(16), dp(22), dp(16), dp(36))
         }
 
-        // Top navigation button to return to Page 2 (or swipe down at top)
-        val btnBackToWidgets = createDialogMiniButton("▲ Nazaj na števce", accent = true) {
-            pager.switchToPage(1)
+        // Top navigation button to return to counters
+        val btnBackToWidgets = createDialogMiniButton("← Nazaj na števce", accent = true) {
+            closeSettingsPage()
         }.apply {
             gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat()
+                setColor(ThemeColors.AccentBlueActiveBg)
+                setStroke(dp(1), ThemeColors.AccentBlue)
+            }
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
+                leftMargin = dp(10)
+                rightMargin = dp(10)
                 bottomMargin = dp(8)
             }
         }
@@ -2923,7 +3085,7 @@ class WearMainActivity : Activity() {
         audioCard.addView(voiceDetailsContainer)
         container.addView(audioCard)
 
-        // Save button
+        // Save button (shaped for circular watch bottom)
         val btnSave = TextView(this).apply {
             text = "Shrani nastavitve"
             gravity = Gravity.CENTER
@@ -2932,13 +3094,15 @@ class WearMainActivity : Activity() {
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             setPadding(dp(12), dp(10), dp(12), dp(10))
             background = GradientDrawable().apply {
-                cornerRadius = dp(10).toFloat()
+                cornerRadius = dp(18).toFloat()
                 setColor(ThemeColors.AccentBlue)
             }
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
+                leftMargin = dp(10)
+                rightMargin = dp(10)
                 topMargin = dp(4)
             }
             setOnClickListener {
@@ -2992,8 +3156,7 @@ class WearMainActivity : Activity() {
                 scheduleAutoLockIfNeeded()
                 refreshWidgetsUi()
                 restartNetworking()
-                scroll.scrollTo(0, 0)
-                pager.switchToPage(0)
+                closeSettingsPage()
             }
         }
         container.addView(btnSave)
@@ -3171,25 +3334,28 @@ class WearMainActivity : Activity() {
 }
 
 /**
- * 3-page vertical pager for Wear OS:
- * - Page 0: Time Countdown Widget (6min/10min switch + funicular track)
- * - Page 1: Persons / Capacity Widget (+1, -1 + long-press reset)
- * - Page 2: Settings (scrollable)
- * Includes subtle 3-dot page indicator on the right edge.
+ * 2D gesture pager for Wear OS:
+ * - Swipe LEFT / RIGHT: switches between Page 0 (Time Countdown) and Page 1 (Persons / Capacity)
+ * - Swipe UP / DOWN: switches between Zgornja postaja (0) and Spodnja postaja (1)
+ * Includes subtle 2-dot vertical station indicator on the right edge
+ * and 2-dot horizontal page indicator at the bottom edge.
  */
-class WearVerticalPager(
+class Wear2DPager(
     context: Context,
     private val page0: View,
     private val page1: View,
-    private val page2: ScrollView
+    private val getStationIndex: () -> Int,
+    private val onSwitchStation: (Int) -> Unit
 ) : FrameLayout(context) {
 
-    private val pages = arrayOf(page0, page1, page2)
-    private var currentIndex: Int = 0
+    private enum class DragAxis { NONE, HORIZONTAL, VERTICAL }
+
+    private val pages = arrayOf(page0, page1)
+    private var currentPageIndex: Int = 0
     private val touchSlop: Int = ViewConfiguration.get(context).scaledTouchSlop
     private var downX: Float = 0f
     private var downY: Float = 0f
-    private var isDraggingVertical: Boolean = false
+    private var dragAxis: DragAxis = DragAxis.NONE
     private var velocityTracker: VelocityTracker? = null
     private var lastRotarySwitchMs: Long = 0L
 
@@ -3217,21 +3383,25 @@ class WearVerticalPager(
         postDelayed(fadeRunnable, 2200L)
     }
 
+    private fun wakeIndicators() {
+        indicatorAlpha = 1.0f
+        removeCallbacks(fadeRunnable)
+        postDelayed(fadeRunnable, 2200L)
+        invalidate()
+    }
+
     fun onRotaryScroll(delta: Float) {
-        if (currentIndex == 2) {
-            page2.smoothScrollBy(0, (delta * dp(28)).roundToInt())
-            return
-        }
         val now = SystemClock.elapsedRealtime()
         if (now - lastRotarySwitchMs < 320L) return
-        if (delta > 0.35f && currentIndex < 2) {
+        val stationIdx = getStationIndex()
+        if (delta > 0.35f && stationIdx == 0) {
             lastRotarySwitchMs = now
             performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-            switchToPage(currentIndex + 1)
-        } else if (delta < -0.35f && currentIndex > 0) {
+            animateStationSwitch(1)
+        } else if (delta < -0.35f && stationIdx == 1) {
             lastRotarySwitchMs = now
             performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-            switchToPage(currentIndex - 1)
+            animateStationSwitch(0)
         }
     }
 
@@ -3240,30 +3410,28 @@ class WearVerticalPager(
             MotionEvent.ACTION_DOWN -> {
                 downX = ev.x
                 downY = ev.y
-                isDraggingVertical = false
+                dragAxis = DragAxis.NONE
                 velocityTracker?.recycle()
                 velocityTracker = VelocityTracker.obtain()
                 velocityTracker?.addMovement(ev)
+                parent?.requestDisallowInterceptTouchEvent(true)
             }
             MotionEvent.ACTION_MOVE -> {
                 velocityTracker?.addMovement(ev)
-                val dy = ev.y - downY
                 val dx = ev.x - downX
-                if (abs(dy) > touchSlop && abs(dy) > abs(dx) * 1.15f) {
-                    // On Page 2 (Settings ScrollView), only intercept downward drag when scrolled to very top
-                    if (currentIndex == 2) {
-                        if (dy > 0f && !page2.canScrollVertically(-1)) {
-                            isDraggingVertical = true
-                            return true
-                        }
-                        return false
-                    }
-                    isDraggingVertical = true
+                val dy = ev.y - downY
+                if (abs(dx) > touchSlop && abs(dx) > abs(dy) * 1.12f) {
+                    dragAxis = DragAxis.HORIZONTAL
+                    parent?.requestDisallowInterceptTouchEvent(true)
+                    return true
+                } else if (abs(dy) > touchSlop && abs(dy) > abs(dx) * 1.12f) {
+                    dragAxis = DragAxis.VERTICAL
+                    parent?.requestDisallowInterceptTouchEvent(true)
                     return true
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                isDraggingVertical = false
+                dragAxis = DragAxis.NONE
                 velocityTracker?.recycle()
                 velocityTracker = null
             }
@@ -3276,97 +3444,181 @@ class WearVerticalPager(
             velocityTracker = VelocityTracker.obtain()
         }
         velocityTracker?.addMovement(ev)
-        val activeView = pages[currentIndex]
+        val activeView = pages[currentPageIndex]
 
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 downX = ev.x
                 downY = ev.y
-                isDraggingVertical = false
+                dragAxis = DragAxis.NONE
+                parent?.requestDisallowInterceptTouchEvent(true)
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                val dy = ev.y - downY
                 val dx = ev.x - downX
-                if (!isDraggingVertical && abs(dy) > touchSlop && abs(dy) > abs(dx)) {
-                    isDraggingVertical = true
+                val dy = ev.y - downY
+                if (dragAxis == DragAxis.NONE) {
+                    if (abs(dx) > touchSlop && abs(dx) >= abs(dy)) {
+                        dragAxis = DragAxis.HORIZONTAL
+                    } else if (abs(dy) > touchSlop && abs(dy) > abs(dx)) {
+                        dragAxis = DragAxis.VERTICAL
+                    }
                 }
-                if (isDraggingVertical) {
-                    val canGoNext = currentIndex < 2 && dy < 0f
-                    val canGoPrev = currentIndex > 0 && dy > 0f
-                    activeView.translationY = if (canGoNext || canGoPrev) dy * 0.25f else 0f
+                when (dragAxis) {
+                    DragAxis.HORIZONTAL -> {
+                        val canGoRightPage = (currentPageIndex == 0 && dx < 0f)
+                        val canGoLeftPage = (currentPageIndex == 1 && dx > 0f)
+                        activeView.translationX = if (canGoRightPage || canGoLeftPage) dx * 0.25f else dx * 0.05f
+                        activeView.translationY = 0f
+                    }
+                    DragAxis.VERTICAL -> {
+                        val stIdx = getStationIndex()
+                        val canGoSpodaj = (stIdx == 0 && dy < 0f)
+                        val canGoZgoraj = (stIdx == 1 && dy > 0f)
+                        activeView.translationY = if (canGoSpodaj || canGoZgoraj) dy * 0.25f else dy * 0.05f
+                        activeView.translationX = 0f
+                    }
+                    DragAxis.NONE -> {}
                 }
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val dx = ev.x - downX
                 val dy = ev.y - downY
                 velocityTracker?.computeCurrentVelocity(1000)
+                val vx = velocityTracker?.xVelocity ?: 0f
                 val vy = velocityTracker?.yVelocity ?: 0f
                 velocityTracker?.recycle()
                 velocityTracker = null
 
-                val minSwipeDist = dp(28)
-                if (isDraggingVertical) {
-                    if (dy < 0f && currentIndex < 2 && (-dy > minSwipeDist || -vy > 320f)) {
-                        performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-                        switchToPage(currentIndex + 1)
-                    } else if (dy > 0f && currentIndex > 0 && (dy > minSwipeDist || vy > 320f)) {
-                        performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-                        switchToPage(currentIndex - 1)
-                    } else {
-                        activeView.animate().translationY(0f).alpha(1f).setDuration(140L).start()
+                val minSwipeDist = dp(24)
+                val minSwipeVel = 290f
+
+                when (dragAxis) {
+                    DragAxis.HORIZONTAL -> {
+                        if (dx < 0f && currentPageIndex == 0 && (-dx > minSwipeDist || -vx > minSwipeVel)) {
+                            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                            switchToPage(1)
+                        } else if (dx > 0f && currentPageIndex == 1 && (dx > minSwipeDist || vx > minSwipeVel)) {
+                            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                            switchToPage(0)
+                        } else {
+                            activeView.animate().translationX(0f).translationY(0f).alpha(1f).setDuration(140L).start()
+                        }
                     }
-                } else {
-                    activeView.animate().translationY(0f).alpha(1f).setDuration(140L).start()
+                    DragAxis.VERTICAL -> {
+                        val stIdx = getStationIndex()
+                        if (dy < 0f && stIdx == 0 && (-dy > minSwipeDist || -vy > minSwipeVel)) {
+                            // Swipe UP -> Spodnja postaja (1)
+                            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                            animateStationSwitch(1)
+                        } else if (dy > 0f && stIdx == 1 && (dy > minSwipeDist || vy > minSwipeVel)) {
+                            // Swipe DOWN -> Zgornja postaja (0)
+                            performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                            animateStationSwitch(0)
+                        } else {
+                            activeView.animate().translationX(0f).translationY(0f).alpha(1f).setDuration(140L).start()
+                        }
+                    }
+                    DragAxis.NONE -> {
+                        activeView.animate().translationX(0f).translationY(0f).alpha(1f).setDuration(140L).start()
+                    }
                 }
-                isDraggingVertical = false
+                dragAxis = DragAxis.NONE
                 return true
             }
         }
         return super.onTouchEvent(ev)
     }
 
-    fun switchToPage(targetIndex: Int) {
-        if (targetIndex !in 0..2 || targetIndex == currentIndex) return
-        val animateDown = targetIndex < currentIndex
-        val outgoing = pages[currentIndex]
-        val incoming = pages[targetIndex]
-        currentIndex = targetIndex
-
-        if (targetIndex == 2) {
-            page2.scrollTo(0, 0)
+    fun switchToPage(targetIndex: Int, animate: Boolean = true) {
+        if (targetIndex !in 0..1) return
+        if (targetIndex == currentPageIndex) {
+            pages[currentPageIndex].animate().translationX(0f).translationY(0f).alpha(1f).setDuration(120L).start()
+            return
         }
+        val animateRight = targetIndex < currentPageIndex
+        val outgoing = pages[currentPageIndex]
+        val incoming = pages[targetIndex]
+        currentPageIndex = targetIndex
 
-        indicatorAlpha = 1.0f
-        removeCallbacks(fadeRunnable)
-        postDelayed(fadeRunnable, 2200L)
-        invalidate()
-
-        val shift = (if (height > 0) height else dp(200)) * 0.22f
-        val outTargetY = if (animateDown) shift else -shift
-        val inStartY = if (animateDown) -shift else shift
+        wakeIndicators()
 
         outgoing.animate().cancel()
         incoming.animate().cancel()
 
+        if (!animate) {
+            outgoing.visibility = View.GONE
+            outgoing.translationX = 0f
+            outgoing.translationY = 0f
+            outgoing.alpha = 1f
+            incoming.translationX = 0f
+            incoming.translationY = 0f
+            incoming.alpha = 1f
+            incoming.visibility = View.VISIBLE
+            return
+        }
+
+        val shift = (if (width > 0) width else dp(200)) * 0.22f
+        val outTargetX = if (animateRight) shift else -shift
+        val inStartX = if (animateRight) -shift else shift
+
         outgoing.animate()
-            .translationY(outTargetY)
+            .translationX(outTargetX)
+            .translationY(0f)
             .alpha(0f)
-            .setDuration(160L)
+            .setDuration(150L)
             .withEndAction {
                 outgoing.visibility = View.GONE
+                outgoing.translationX = 0f
                 outgoing.translationY = 0f
                 outgoing.alpha = 1f
             }
             .start()
 
-        incoming.translationY = inStartY
+        incoming.translationX = inStartX
+        incoming.translationY = 0f
         incoming.alpha = 0f
         incoming.visibility = View.VISIBLE
         incoming.animate()
+            .translationX(0f)
             .translationY(0f)
             .alpha(1f)
-            .setDuration(190L)
+            .setDuration(180L)
+            .start()
+    }
+
+    fun animateStationSwitch(targetStationIndex: Int) {
+        val currentStation = getStationIndex()
+        val activeView = pages[currentPageIndex]
+        if (targetStationIndex == currentStation) {
+            activeView.animate().translationX(0f).translationY(0f).alpha(1f).setDuration(120L).start()
+            return
+        }
+        val animateDown = (targetStationIndex == 0)
+        val shift = (if (height > 0) height else dp(200)) * 0.18f
+        val outTargetY = if (animateDown) shift else -shift
+        val inStartY = if (animateDown) -shift else shift
+
+        wakeIndicators()
+        activeView.animate().cancel()
+
+        activeView.animate()
+            .translationY(outTargetY)
+            .translationX(0f)
+            .alpha(0f)
+            .setDuration(110L)
+            .withEndAction {
+                onSwitchStation(targetStationIndex)
+                invalidate()
+                activeView.translationY = inStartY
+                activeView.translationX = 0f
+                activeView.animate()
+                    .translationY(0f)
+                    .alpha(1f)
+                    .setDuration(150L)
+                    .start()
+            }
             .start()
     }
 
@@ -3376,17 +3628,32 @@ class WearVerticalPager(
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
 
-        val dotX = w - dpF(5.5f)
-        val centerY = h * 0.5f
-        val spacing = dpF(9f)
+        val stationIdx = getStationIndex()
+        val spacing = dpF(8.5f)
 
-        for (i in 0..2) {
-            val cy = centerY + (i - 1) * spacing
-            val isSelected = (i == currentIndex)
+        // 1) Vertical 2-dot indicator on right edge (0 = Zgornja postaja, 1 = Spodnja postaja)
+        val rightDotX = w - dpF(5f)
+        val centerY = h * 0.5f
+        for (i in 0..1) {
+            val cy = centerY + (i - 0.5f) * spacing
+            val isSelected = (i == stationIdx)
+            val activeCol = if (i == 0) ThemeColors.AccentBlue else ThemeColors.AccentEmerald
+            dotPaint.color = if (isSelected) activeCol else ThemeColors.TextMuted
+            dotPaint.alpha = ((if (isSelected) 240 else 115) * indicatorAlpha).roundToInt().coerceIn(30, 255)
+            val r = if (isSelected) dpF(2.6f) else dpF(1.8f)
+            canvas.drawCircle(rightDotX, cy, r, dotPaint)
+        }
+
+        // 2) Horizontal 2-dot indicator at bottom center (0 = Countdown, 1 = Capacity)
+        val bottomDotY = h - dpF(4.2f)
+        val centerX = w * 0.5f
+        for (i in 0..1) {
+            val cx = centerX + (i - 0.5f) * spacing
+            val isSelected = (i == currentPageIndex)
             dotPaint.color = if (isSelected) ThemeColors.AccentBlue else ThemeColors.TextMuted
-            dotPaint.alpha = ((if (isSelected) 240 else 120) * indicatorAlpha).roundToInt().coerceIn(30, 255)
-            val r = if (isSelected) dpF(2.7f) else dpF(1.9f)
-            canvas.drawCircle(dotX, cy, r, dotPaint)
+            dotPaint.alpha = ((if (isSelected) 240 else 115) * indicatorAlpha).roundToInt().coerceIn(30, 255)
+            val r = if (isSelected) dpF(2.4f) else dpF(1.7f)
+            canvas.drawCircle(cx, bottomDotY, r, dotPaint)
         }
     }
 
@@ -3408,21 +3675,24 @@ class WearVerticalPager(
 }
 
 /**
- * Compact header bar shared by Page 1 (Time) and Page 2 (Persons):
- * Only displays:
- * 1) Station badge (`ZGORAJ` / `SPODAJ`) with live connection status dot (tap to switch station)
- * 2) Lock icon button (`WearLockButton`)
+ * Compact header bar shared by Page 0 (Time Countdown) and Page 1 (Persons Capacity):
+ * Displays:
+ * 1) Station badge (`ZGORAJ` / `SPODAJ`) with live connection status dot (tap or swipe up/down to switch station)
+ * 2) Lock icon button (`btnLock`)
+ * 3) Dedicated Settings icon button (`btnSettings`) next to the lock button
  */
 class WearWidgetHeader(
     context: Context,
     onToggleStation: () -> Unit,
-    onToggleLock: () -> Unit
+    onToggleLock: () -> Unit,
+    onOpenSettings: () -> Unit
 ) : LinearLayout(context) {
 
     private val stationPill: LinearLayout
     private val statusDot: View
     private val lblStationBadge: TextView
-    val btnLock: WearLockButton
+    val btnLock: WearTopIconButton
+    val btnSettings: WearTopIconButton
 
     init {
         orientation = HORIZONTAL
@@ -3431,7 +3701,7 @@ class WearWidgetHeader(
         stationPill = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(9), dp(4), dp(10), dp(4))
+            setPadding(dp(8), dp(4), dp(9), dp(4))
             background = GradientDrawable().apply {
                 cornerRadius = dp(12).toFloat()
                 setColor(0x2238BDF8.toInt())
@@ -3448,15 +3718,15 @@ class WearWidgetHeader(
                 shape = GradientDrawable.OVAL
                 setColor(ThemeColors.AccentAmber)
             }
-            layoutParams = LayoutParams(dp(6), dp(6)).apply {
-                rightMargin = dp(5)
+            layoutParams = LayoutParams(dp(5), dp(5)).apply {
+                rightMargin = dp(4)
             }
         }
 
         lblStationBadge = TextView(context).apply {
             text = "ZGORAJ"
             setTextColor(ThemeColors.AccentBlue)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             setSingleLine(true)
         }
@@ -3464,16 +3734,35 @@ class WearWidgetHeader(
         stationPill.addView(statusDot)
         stationPill.addView(lblStationBadge)
 
-        btnLock = WearLockButton(context, initialLocked = true) {
+        btnLock = WearTopIconButton(
+            context = context,
+            iconType = WearTopIconButton.IconType.LOCK,
+            initialLocked = true
+        ) {
             onToggleLock()
         }.apply {
-            layoutParams = LayoutParams(dp(28), dp(26)).apply {
-                leftMargin = dp(6)
+            contentDescription = "Zakleni ali odkleni kontrole"
+            layoutParams = LayoutParams(dp(26), dp(25)).apply {
+                leftMargin = dp(5)
+            }
+        }
+
+        btnSettings = WearTopIconButton(
+            context = context,
+            iconType = WearTopIconButton.IconType.SETTINGS,
+            initialLocked = false
+        ) {
+            onOpenSettings()
+        }.apply {
+            contentDescription = "Nastavitve"
+            layoutParams = LayoutParams(dp(26), dp(25)).apply {
+                leftMargin = dp(4)
             }
         }
 
         addView(stationPill)
         addView(btnLock)
+        addView(btnSettings)
     }
 
     fun bind(isZgoraj: Boolean, isOnline: Boolean, isSending: Boolean) {
@@ -3511,13 +3800,16 @@ class WearWidgetHeader(
 }
 
 /**
- * Padlock icon button for Wear OS widget headers.
+ * Top bar icon button for Wear OS widget headers (Lock padlock & Settings gear).
  */
-class WearLockButton(
+class WearTopIconButton(
     context: Context,
+    private val iconType: IconType,
     initialLocked: Boolean,
     private val onClick: () -> Unit
 ) : View(context) {
+
+    enum class IconType { LOCK, SETTINGS }
 
     var isLockedState: Boolean = initialLocked
         set(value) {
@@ -3570,9 +3862,9 @@ class WearLockButton(
     }
 
     private fun updateVisuals() {
-        bgDrawable.cornerRadius = dpF(13f)
+        bgDrawable.cornerRadius = dpF(12.5f)
         val strokePx = max(1, dpF(1f).roundToInt())
-        if (isLockedState) {
+        if (iconType == IconType.LOCK && isLockedState) {
             bgDrawable.setColor(if (isPressedState) ThemeColors.BtnPressedBg else ThemeColors.AccentAmberBg)
             bgDrawable.setStroke(strokePx, ThemeColors.AccentAmber)
             iconPaint.color = ThemeColors.AccentAmber
@@ -3597,32 +3889,65 @@ class WearLockButton(
         val ox = (w - 20f * scale) * 0.5f
         val oy = (h - 20f * scale) * 0.5f
 
-        iconPaint.strokeWidth = max(1.6f, 1.85f * scale)
+        iconPaint.strokeWidth = max(1.5f, 1.8f * scale)
         iconPath.reset()
 
-        rectF.set(ox + 4.2f * scale, oy + 9.2f * scale, ox + 15.8f * scale, oy + 17.6f * scale)
-        canvas.drawRoundRect(rectF, 2.2f * scale, 2.2f * scale, iconPaint)
+        when (iconType) {
+            IconType.LOCK -> {
+                rectF.set(ox + 4.2f * scale, oy + 9.2f * scale, ox + 15.8f * scale, oy + 17.6f * scale)
+                canvas.drawRoundRect(rectF, 2.2f * scale, 2.2f * scale, iconPaint)
 
-        canvas.drawCircle(ox + 10f * scale, oy + 12.8f * scale, 1.15f * scale, fillPaint)
-        canvas.drawLine(
-            ox + 10f * scale, oy + 13.5f * scale,
-            ox + 10f * scale, oy + 15.3f * scale,
-            iconPaint
-        )
+                canvas.drawCircle(ox + 10f * scale, oy + 12.8f * scale, 1.15f * scale, fillPaint)
+                canvas.drawLine(
+                    ox + 10f * scale, oy + 13.5f * scale,
+                    ox + 10f * scale, oy + 15.3f * scale,
+                    iconPaint
+                )
 
-        if (isLockedState) {
-            iconPath.moveTo(ox + 6.8f * scale, oy + 9.2f * scale)
-            iconPath.lineTo(ox + 6.8f * scale, oy + 6.2f * scale)
-            rectF.set(ox + 6.8f * scale, oy + 3.0f * scale, ox + 13.2f * scale, oy + 9.4f * scale)
-            iconPath.arcTo(rectF, 180f, 180f, false)
-            iconPath.lineTo(ox + 13.2f * scale, oy + 9.2f * scale)
-            canvas.drawPath(iconPath, iconPaint)
-        } else {
-            iconPath.moveTo(ox + 6.8f * scale, oy + 9.2f * scale)
-            iconPath.lineTo(ox + 6.8f * scale, oy + 5.2f * scale)
-            rectF.set(ox + 6.8f * scale, oy + 2.0f * scale, ox + 13.2f * scale, oy + 8.4f * scale)
-            iconPath.arcTo(rectF, 180f, 165f, false)
-            canvas.drawPath(iconPath, iconPaint)
+                if (isLockedState) {
+                    iconPath.moveTo(ox + 6.8f * scale, oy + 9.2f * scale)
+                    iconPath.lineTo(ox + 6.8f * scale, oy + 6.2f * scale)
+                    rectF.set(ox + 6.8f * scale, oy + 3.0f * scale, ox + 13.2f * scale, oy + 9.4f * scale)
+                    iconPath.arcTo(rectF, 180f, 180f, false)
+                    iconPath.lineTo(ox + 13.2f * scale, oy + 9.2f * scale)
+                    canvas.drawPath(iconPath, iconPaint)
+                } else {
+                    iconPath.moveTo(ox + 6.8f * scale, oy + 9.2f * scale)
+                    iconPath.lineTo(ox + 6.8f * scale, oy + 5.2f * scale)
+                    rectF.set(ox + 6.8f * scale, oy + 2.0f * scale, ox + 13.2f * scale, oy + 8.4f * scale)
+                    iconPath.arcTo(rectF, 180f, 165f, false)
+                    canvas.drawPath(iconPath, iconPaint)
+                }
+            }
+
+            IconType.SETTINGS -> {
+                val cx = ox + 10f * scale
+                val cy = oy + 10f * scale
+                val outerR = 7.4f * scale
+                val baseR = 5.6f * scale
+                val innerR = 2.6f * scale
+                val numTeeth = 8
+                val step = (2.0 * Math.PI) / (numTeeth * 2)
+
+                for (i in 0 until numTeeth * 2) {
+                    val r = if (i % 2 == 0) outerR else baseR
+                    val a1 = i * step - step * 0.38
+                    val a2 = i * step + step * 0.38
+                    val x1 = (cx + r * cos(a1)).toFloat()
+                    val y1 = (cy + r * sin(a1)).toFloat()
+                    val x2 = (cx + r * cos(a2)).toFloat()
+                    val y2 = (cy + r * sin(a2)).toFloat()
+                    if (i == 0) {
+                        iconPath.moveTo(x1, y1)
+                    } else {
+                        iconPath.lineTo(x1, y1)
+                    }
+                    iconPath.lineTo(x2, y2)
+                }
+                iconPath.close()
+                canvas.drawPath(iconPath, iconPaint)
+                canvas.drawCircle(cx, cy, innerR, iconPaint)
+            }
         }
     }
 
@@ -3636,12 +3961,162 @@ class WearLockButton(
 }
 
 /**
- * WIDGET 1 (Page 0): Time Countdown + Funicular Track + 6 min / 10 min Switch.
+ * Curved bottom action button tailored for the lower hemisphere of a circular watch screen.
+ * The outer bottom corner follows a large circular curve so the left/right bottom button pair
+ * hugs the round watch bezel without clipping.
+ */
+class WearCircularBottomButton(
+    context: Context,
+    private val label: String,
+    private val isLeft: Boolean,
+    private val textSizeSp: Float = 14f,
+    private val accentStripeColor: Int? = null,
+    private val isLockedProvider: () -> Boolean,
+    private val onClick: () -> Unit
+) : View(context) {
+
+    var isActiveState: Boolean = false
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    private var isPressedState: Boolean = false
+    private val shapePath = Path()
+    private val rectF = RectF()
+    private val stripeRectF = RectF()
+
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+    }
+    private val stripePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        textAlign = Paint.Align.CENTER
+    }
+
+    init {
+        setOnTouchListener { v, event ->
+            if (isLockedProvider()) return@setOnTouchListener false
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    isPressedState = true
+                    invalidate()
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    isPressedState = false
+                    invalidate()
+                    v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                    onClick()
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    isPressedState = false
+                    invalidate()
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+
+        val strokeW = max(1f, dpF(1.1f))
+        val halfStroke = strokeW * 0.5f
+        rectF.set(halfStroke, halfStroke, w - halfStroke, h - halfStroke)
+
+        val topOuterR = dpF(10f)
+        val topInnerR = dpF(7f)
+        val botInnerR = dpF(10f)
+        val botOuterR = min(w * 0.76f, h * 0.94f).coerceAtLeast(topOuterR)
+
+        val radii = if (isLeft) {
+            floatArrayOf(
+                topOuterR, topOuterR, // top-left
+                topInnerR, topInnerR, // top-right (inner gap)
+                botInnerR, botInnerR, // bottom-right (inner gap)
+                botOuterR, botOuterR  // bottom-left (curved along circular bezel)
+            )
+        } else {
+            floatArrayOf(
+                topInnerR, topInnerR, // top-left (inner gap)
+                topOuterR, topOuterR, // top-right
+                botOuterR, botOuterR, // bottom-right (curved along circular bezel)
+                botInnerR, botInnerR  // bottom-left (inner gap)
+            )
+        }
+
+        shapePath.reset()
+        shapePath.addRoundRect(rectF, radii, Path.Direction.CW)
+
+        fillPaint.color = when {
+            isPressedState -> ThemeColors.BtnPressedBg
+            isActiveState -> ThemeColors.AccentBlueActiveBg
+            else -> ThemeColors.BtnBg
+        }
+        canvas.drawPath(shapePath, fillPaint)
+
+        if (accentStripeColor != null) {
+            val saveCount = canvas.save()
+            canvas.clipPath(shapePath)
+            stripePaint.color = accentStripeColor
+            stripeRectF.set(0f, 0f, w, dpF(3.4f))
+            canvas.drawRect(stripeRectF, stripePaint)
+            canvas.restoreToCount(saveCount)
+        }
+
+        strokePaint.strokeWidth = strokeW
+        strokePaint.color = when {
+            isPressedState -> accentStripeColor ?: ThemeColors.AccentBlue
+            isActiveState -> ThemeColors.AccentBlue
+            else -> ThemeColors.BtnBorder
+        }
+        canvas.drawPath(shapePath, strokePaint)
+
+        textPaint.textSize = spF(textSizeSp)
+        textPaint.color = if (isActiveState) ThemeColors.AccentBlue else ThemeColors.TextPrimary
+        val opticalShiftX = if (isLeft) dpF(3.5f) else -dpF(3.5f)
+        val textCenterX = w * 0.5f + opticalShiftX
+        val textCenterY = h * 0.46f - (textPaint.descent() + textPaint.ascent()) * 0.5f
+        canvas.drawText(label, textCenterX, textCenterY, textPaint)
+    }
+
+    private fun dpF(value: Float): Float {
+        return TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP,
+            value,
+            resources.displayMetrics
+        )
+    }
+
+    private fun spF(value: Float): Float {
+        return TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_SP,
+            value,
+            resources.displayMetrics
+        )
+    }
+}
+
+/**
+ * WIDGET 1 (Page 0, Left): Time Countdown + Funicular Track + 6 min / 10 min Switch.
  */
 class TimeWidgetPage(
     context: Context,
     onToggleStation: () -> Unit,
     onToggleLock: () -> Unit,
+    onOpenSettings: () -> Unit,
     onToggleShowInterval: () -> Unit,
     private val onSelectIntervalCommand: (Int) -> Unit
 ) : LinearLayout(context) {
@@ -3655,10 +4130,8 @@ class TimeWidgetPage(
     private val timerProgressFill: View
     val funicularTrackView: FunicularTrackView
 
-    private val btn6Min: FrameLayout
-    private val txt6Min: TextView
-    private val btn10Min: FrameLayout
-    private val txt10Min: TextView
+    private val btn6Min: WearCircularBottomButton
+    private val btn10Min: WearCircularBottomButton
 
     private var controlsLocked: Boolean = true
     private var lastRatio: Double = 0.0
@@ -3672,12 +4145,13 @@ class TimeWidgetPage(
         // Safe round-watch padding
         val dm = resources.displayMetrics
         val minDim = min(dm.widthPixels, dm.heightPixels)
-        val horizPad = (minDim * 0.105f).roundToInt().coerceAtLeast(dp(14))
-        val topPad = (minDim * 0.055f).roundToInt().coerceAtLeast(dp(8))
-        val botPad = (minDim * 0.085f).roundToInt().coerceAtLeast(dp(12))
+        val horizPad = (minDim * 0.095f).roundToInt().coerceAtLeast(dp(14))
+        val topPad = (minDim * 0.075f).roundToInt().coerceAtLeast(dp(11))
+        val botPad = (minDim * 0.06f).roundToInt().coerceAtLeast(dp(9))
+        val bottomSideInset = (minDim * 0.045f).roundToInt().coerceAtLeast(dp(8))
         setPadding(horizPad, topPad, horizPad, botPad)
 
-        header = WearWidgetHeader(context, onToggleStation, onToggleLock).apply {
+        header = WearWidgetHeader(context, onToggleStation, onToggleLock, onOpenSettings).apply {
             layoutParams = LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -3702,7 +4176,7 @@ class TimeWidgetPage(
                 setColor(ThemeColors.SubCardBg)
                 setStroke(dp(1), ThemeColors.Divider)
             }
-            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.25f).apply {
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.22f).apply {
                 bottomMargin = dp(4)
             }
             setOnClickListener {
@@ -3774,28 +4248,48 @@ class TimeWidgetPage(
 
         // Mini Funicular Car Track Animation
         funicularTrackView = FunicularTrackView(context, isZgornjaToSpodnja = true).apply {
-            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.58f).apply {
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.56f).apply {
                 bottomMargin = dp(4)
             }
         }
         contentCol.addView(funicularTrackView)
 
-        // 6 min / 10 min Switch Row
+        // 6 min / 10 min Circular Watch Bottom Switch Row
         val switchRow = LinearLayout(context).apply {
             orientation = HORIZONTAL
-            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.68f).apply {
-                leftMargin = dp(6)
-                rightMargin = dp(6)
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.72f).apply {
+                leftMargin = bottomSideInset
+                rightMargin = bottomSideInset
             }
         }
 
-        val pair6 = createIntervalSwitchButton("6 min", commandId = 10, isLeft = true)
-        btn6Min = pair6.first
-        txt6Min = pair6.second
+        btn6Min = WearCircularBottomButton(
+            context = context,
+            label = "6 min",
+            isLeft = true,
+            textSizeSp = 13.5f,
+            accentStripeColor = null,
+            isLockedProvider = { controlsLocked },
+            onClick = { onSelectIntervalCommand(10) }
+        ).apply {
+            layoutParams = LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                rightMargin = dp(3)
+            }
+        }
 
-        val pair10 = createIntervalSwitchButton("10 min", commandId = 11, isLeft = false)
-        btn10Min = pair10.first
-        txt10Min = pair10.second
+        btn10Min = WearCircularBottomButton(
+            context = context,
+            label = "10 min",
+            isLeft = false,
+            textSizeSp = 13.5f,
+            accentStripeColor = null,
+            isLockedProvider = { controlsLocked },
+            onClick = { onSelectIntervalCommand(11) }
+        ).apply {
+            layoutParams = LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                leftMargin = dp(3)
+            }
+        }
 
         switchRow.addView(btn6Min)
         switchRow.addView(btn10Min)
@@ -3803,56 +4297,6 @@ class TimeWidgetPage(
 
         addView(contentCol)
         updateSwitchVisuals()
-    }
-
-    private fun createIntervalSwitchButton(
-        label: String,
-        commandId: Int,
-        isLeft: Boolean
-    ): Pair<FrameLayout, TextView> {
-        val container = FrameLayout(context).apply {
-            layoutParams = LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
-                if (isLeft) rightMargin = dp(4) else leftMargin = dp(4)
-            }
-        }
-        val txt = TextView(context).apply {
-            text = label
-            setTextColor(ThemeColors.TextPrimary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            gravity = Gravity.CENTER
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        }
-        container.addView(txt)
-
-        container.setOnTouchListener { v, event ->
-            if (controlsLocked) return@setOnTouchListener false
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    v.background = GradientDrawable().apply {
-                        cornerRadius = dp(9).toFloat()
-                        setColor(ThemeColors.BtnPressedBg)
-                        setStroke(dp(1), ThemeColors.AccentBlue)
-                    }
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    updateSwitchVisuals()
-                    v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-                    onSelectIntervalCommand(commandId)
-                    true
-                }
-                MotionEvent.ACTION_CANCEL -> {
-                    updateSwitchVisuals()
-                    true
-                }
-                else -> false
-            }
-        }
-        return container to txt
     }
 
     fun setControlsLocked(locked: Boolean) {
@@ -3864,22 +4308,8 @@ class TimeWidgetPage(
     }
 
     private fun updateSwitchVisuals() {
-        val is6Active = (activeIntervalMin == 6)
-        val is10Active = (activeIntervalMin == 10)
-
-        btn6Min.background = GradientDrawable().apply {
-            cornerRadius = dp(9).toFloat()
-            setColor(if (is6Active) ThemeColors.AccentBlueActiveBg else ThemeColors.BtnBg)
-            setStroke(dp(1), if (is6Active) ThemeColors.AccentBlue else ThemeColors.BtnBorder)
-        }
-        txt6Min.setTextColor(if (is6Active) ThemeColors.AccentBlue else ThemeColors.TextPrimary)
-
-        btn10Min.background = GradientDrawable().apply {
-            cornerRadius = dp(9).toFloat()
-            setColor(if (is10Active) ThemeColors.AccentBlueActiveBg else ThemeColors.BtnBg)
-            setStroke(dp(1), if (is10Active) ThemeColors.AccentBlue else ThemeColors.BtnBorder)
-        }
-        txt10Min.setTextColor(if (is10Active) ThemeColors.AccentBlue else ThemeColors.TextPrimary)
+        btn6Min.isActiveState = (activeIntervalMin == 6)
+        btn10Min.isActiveState = (activeIntervalMin == 10)
     }
 
     fun render(isZgoraj: Boolean, tracker: StationTelemetryTracker, showIntervalInline: Boolean) {
@@ -4002,12 +4432,13 @@ class TimeWidgetPage(
 }
 
 /**
- * WIDGET 2 (Page 1): Persons / Capacity (+1, -1 buttons + long-press counter to reset).
+ * WIDGET 2 (Page 1, Right): Persons / Capacity (+1, -1 circular bottom buttons + long-press counter to reset).
  */
 class PersonsWidgetPage(
     context: Context,
     onToggleStation: () -> Unit,
     onToggleLock: () -> Unit,
+    onOpenSettings: () -> Unit,
     onToggleShowCapacity: () -> Unit,
     onLongPressReset: () -> Unit,
     private val onPersonCommand: (Int) -> Unit
@@ -4020,8 +4451,8 @@ class PersonsWidgetPage(
     private val txtPersonsMax: TextView
     private val personsProgressTrack: FrameLayout
     private val personsProgressFill: View
-    private val btnMinusOne: View
-    private val btnPlusOne: View
+    private val btnMinusOne: WearCircularBottomButton
+    private val btnPlusOne: WearCircularBottomButton
 
     private var controlsLocked: Boolean = true
     private var lastRatio: Double = 0.0
@@ -4033,12 +4464,13 @@ class PersonsWidgetPage(
 
         val dm = resources.displayMetrics
         val minDim = min(dm.widthPixels, dm.heightPixels)
-        val horizPad = (minDim * 0.105f).roundToInt().coerceAtLeast(dp(14))
-        val topPad = (minDim * 0.055f).roundToInt().coerceAtLeast(dp(8))
-        val botPad = (minDim * 0.085f).roundToInt().coerceAtLeast(dp(12))
+        val horizPad = (minDim * 0.095f).roundToInt().coerceAtLeast(dp(14))
+        val topPad = (minDim * 0.075f).roundToInt().coerceAtLeast(dp(11))
+        val botPad = (minDim * 0.06f).roundToInt().coerceAtLeast(dp(9))
+        val bottomSideInset = (minDim * 0.045f).roundToInt().coerceAtLeast(dp(8))
         setPadding(horizPad, topPad, horizPad, botPad)
 
-        header = WearWidgetHeader(context, onToggleStation, onToggleLock).apply {
+        header = WearWidgetHeader(context, onToggleStation, onToggleLock, onOpenSettings).apply {
             layoutParams = LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -4063,7 +4495,7 @@ class PersonsWidgetPage(
                 setColor(ThemeColors.SubCardBg)
                 setStroke(dp(1), ThemeColors.Divider)
             }
-            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.45f).apply {
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.40f).apply {
                 bottomMargin = dp(5)
             }
             setOnClickListener {
@@ -4142,108 +4574,48 @@ class PersonsWidgetPage(
         personsDisplayBox.addView(personsProgressTrack)
         contentCol.addView(personsDisplayBox)
 
-        // -1 and +1 Buttons Row
+        // -1 and +1 Circular Watch Bottom Buttons Row
         val btnRow = LinearLayout(context).apply {
             orientation = HORIZONTAL
-            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.85f).apply {
-                leftMargin = dp(6)
-                rightMargin = dp(6)
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.88f).apply {
+                leftMargin = bottomSideInset
+                rightMargin = bottomSideInset
             }
         }
 
-        btnMinusOne = createPersonActionButton(
-            commandId = 8,
+        btnMinusOne = WearCircularBottomButton(
+            context = context,
             label = "− 1",
-            accentColor = ThemeColors.AccentRed,
-            isLeft = true
-        )
-        btnPlusOne = createPersonActionButton(
-            commandId = 7,
+            isLeft = true,
+            textSizeSp = 17f,
+            accentStripeColor = ThemeColors.AccentRed,
+            isLockedProvider = { controlsLocked },
+            onClick = { onPersonCommand(8) }
+        ).apply {
+            layoutParams = LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                rightMargin = dp(3)
+            }
+        }
+
+        btnPlusOne = WearCircularBottomButton(
+            context = context,
             label = "+ 1",
-            accentColor = ThemeColors.AccentEmerald,
-            isLeft = false
-        )
+            isLeft = false,
+            textSizeSp = 17f,
+            accentStripeColor = ThemeColors.AccentEmerald,
+            isLockedProvider = { controlsLocked },
+            onClick = { onPersonCommand(7) }
+        ).apply {
+            layoutParams = LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                leftMargin = dp(3)
+            }
+        }
 
         btnRow.addView(btnMinusOne)
         btnRow.addView(btnPlusOne)
         contentCol.addView(btnRow)
 
         addView(contentCol)
-    }
-
-    private fun createPersonActionButton(
-        commandId: Int,
-        label: String,
-        accentColor: Int,
-        isLeft: Boolean
-    ): View {
-        val container = FrameLayout(context).apply {
-            layoutParams = LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
-                if (isLeft) rightMargin = dp(4) else leftMargin = dp(4)
-            }
-        }
-
-        val normalBg = GradientDrawable().apply {
-            cornerRadius = dp(9).toFloat()
-            setColor(ThemeColors.BtnBg)
-            setStroke(dp(1), ThemeColors.BtnBorder)
-        }
-        val pressedBg = GradientDrawable().apply {
-            cornerRadius = dp(9).toFloat()
-            setColor(ThemeColors.BtnPressedBg)
-            setStroke(dp(1), ThemeColors.AccentBlue)
-        }
-        container.background = normalBg
-
-        val accentBar = View(context).apply {
-            background = GradientDrawable().apply {
-                cornerRadii = floatArrayOf(
-                    dp(5).toFloat(), dp(5).toFloat(),
-                    0f, 0f,
-                    0f, 0f,
-                    dp(5).toFloat(), dp(5).toFloat()
-                )
-                setColor(accentColor)
-            }
-            layoutParams = FrameLayout.LayoutParams(dp(4), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.START)
-        }
-
-        val txt = TextView(context).apply {
-            text = label
-            setTextColor(ThemeColors.TextPrimary)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
-            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            gravity = Gravity.CENTER
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        }
-
-        container.addView(accentBar)
-        container.addView(txt)
-
-        container.setOnTouchListener { v, event ->
-            if (controlsLocked) return@setOnTouchListener false
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    v.background = pressedBg
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    v.background = normalBg
-                    v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-                    onPersonCommand(commandId)
-                    true
-                }
-                MotionEvent.ACTION_CANCEL -> {
-                    v.background = normalBg
-                    true
-                }
-                else -> false
-            }
-        }
-        return container
     }
 
     fun setControlsLocked(locked: Boolean) {

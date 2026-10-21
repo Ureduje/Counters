@@ -1304,18 +1304,23 @@ object DirectLanFunicularClient {
             var attempts = 0
             while (abs(t.setTimeMs - targetSetMs) >= 7500L && attempts < 30) {
                 attempts++
+                val prevStepSetMs = t.setTimeMs
                 val diff = targetSetMs - t.setTimeMs
                 val adjCmd = when {
-                    diff >= 210000L -> 3
-                    diff <= -210000L -> 6
-                    diff >= 37500L -> 2
-                    diff <= -37500L -> 5
+                    diff >= 292500L -> 3
+                    diff <= -292500L -> 6
+                    diff >= 52500L -> 2
+                    diff <= -52500L -> 5
                     diff > 0L -> 1
                     else -> 4
                 }
                 Thread.sleep(45)
                 try {
                     t = sendCommand(host, 80, adjCmd, 1500)
+                    if (abs(t.setTimeMs - prevStepSetMs) < 5000L) {
+                        Thread.sleep(70)
+                        t = sendCommand(host, 80, 0, 1500)
+                    }
                 } catch (_: Throwable) {
                     Thread.sleep(120)
                 }
@@ -1380,18 +1385,28 @@ class MainActivity : Activity() {
     @Volatile
     private var lastAppliedStateTs: Long = 0L
     @Volatile
+    private var initialCachedStateTs: Long = 0L
+    @Volatile
+    private var pcClockOffsetMs: Long = 0L
+    @Volatile
+    private var hasPcClockOffset: Boolean = false
+    @Volatile
     private var lanZgorajOnline: Boolean = false
     @Volatile
     private var lanSpodajOnline: Boolean = false
+    private var lastTickRealtimeMs: Long = 0L
 
     private val tickRunnable = object : Runnable {
         override fun run() {
-            cardZgoraj.onLocalTick(200L)
-            cardSpodaj.onLocalTick(200L)
+            val now = SystemClock.elapsedRealtime()
+            val deltaMs = if (lastTickRealtimeMs > 0L) (now - lastTickRealtimeMs).coerceIn(1L, 2000L) else 200L
+            lastTickRealtimeMs = now
+
+            cardZgoraj.onLocalTick(deltaMs)
+            cardSpodaj.onLocalTick(deltaMs)
 
             if (config.useCloudRelay) {
-                val now = SystemClock.elapsedRealtime()
-                if (now - lastCloudSyncSendMs > 90_000L) {
+                if (now - lastCloudSyncSendMs > 45_000L) {
                     requestCloudSync()
                 }
             }
@@ -1536,6 +1551,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        lastTickRealtimeMs = SystemClock.elapsedRealtime()
         uiHandler.removeCallbacks(tickRunnable)
         uiHandler.post(tickRunnable)
         scheduleAutoLockIfNeeded()
@@ -1704,13 +1720,13 @@ class MainActivity : Activity() {
         uiHandler.removeCallbacks(lanPollRunnable)
         stopCloudStream()
         lastAppliedStateTs = 0L
+        initialCachedStateTs = 0L
         lanZgorajOnline = false
         lanSpodajOnline = false
 
         if (config.useCloudRelay) {
             startCloudStream()
-            requestCloudSync()
-            uiHandler.postDelayed({ fetchLatestCachedCloudState() }, 700L)
+            uiHandler.postDelayed({ fetchLatestCachedCloudState() }, 900L)
         } else {
             uiHandler.post(lanPollRunnable)
         }
@@ -1743,6 +1759,7 @@ class MainActivity : Activity() {
                     if (station == "zgoraj") lanZgorajOnline = true else lanSpodajOnline = true
                     setTopConnectionStatus(true)
                     uiHandler.post {
+                        lastTickRealtimeMs = SystemClock.elapsedRealtime()
                         targetCard.applyState(state, forceSyncTime = true, isCachedState = false)
                     }
                 } catch (_: Throwable) {
@@ -1764,7 +1781,10 @@ class MainActivity : Activity() {
                 val stZ = DirectLanFunicularClient.sendCommand(config.ipZgoraj, 80, 0, 1800)
                 lanZgorajOnline = true
                 setTopConnectionStatus(true)
-                uiHandler.post { cardZgoraj.applyState(stZ, forceSyncTime, isCachedState = false) }
+                uiHandler.post {
+                    lastTickRealtimeMs = SystemClock.elapsedRealtime()
+                    cardZgoraj.applyState(stZ, forceSyncTime, isCachedState = false)
+                }
             } catch (_: Throwable) {
                 lanZgorajOnline = false
                 if (!lanSpodajOnline) setTopConnectionStatus(false)
@@ -1776,7 +1796,10 @@ class MainActivity : Activity() {
                 val stS = DirectLanFunicularClient.sendCommand(config.ipSpodaj, 80, 0, 1800)
                 lanSpodajOnline = true
                 setTopConnectionStatus(true)
-                uiHandler.post { cardSpodaj.applyState(stS, forceSyncTime, isCachedState = false) }
+                uiHandler.post {
+                    lastTickRealtimeMs = SystemClock.elapsedRealtime()
+                    cardSpodaj.applyState(stS, forceSyncTime, isCachedState = false)
+                }
             } catch (_: Throwable) {
                 lanSpodajOnline = false
                 if (!lanZgorajOnline) setTopConnectionStatus(false)
@@ -1855,6 +1878,10 @@ class MainActivity : Activity() {
                     }
                     activeStreamConnection = conn
 
+                    if (!isFirebase) {
+                        requestCloudSync()
+                    }
+
                     BufferedReader(InputStreamReader(conn.inputStream, StandardCharsets.UTF_8)).use { reader ->
                         setTopConnectionStatus(true)
                         var currentSseEvent = ""
@@ -1876,8 +1903,18 @@ class MainActivity : Activity() {
                                         val wrapper = JSONObject(dataStr)
                                         val dataObj = wrapper.optJSONObject("data")
                                         if (dataObj != null) {
-                                            applyCloudStatePayload(dataObj.toString(), fromCache = isFirstFirebasePut)
+                                            val wasFirstPut = isFirstFirebasePut
                                             isFirstFirebasePut = false
+                                            if (wasFirstPut) {
+                                                val ts = dataObj.optLong("ts", 0L)
+                                                if (initialCachedStateTs == 0L && ts > 0L) {
+                                                    initialCachedStateTs = ts
+                                                }
+                                            }
+                                            applyCloudStatePayload(dataObj.toString(), fromCache = wasFirstPut)
+                                            if (wasFirstPut) {
+                                                requestCloudSync()
+                                            }
                                         }
                                     }
                                 }
@@ -1926,9 +1963,10 @@ class MainActivity : Activity() {
     private fun sendCloudCommand(station: String, cmdId: Int): Boolean {
         var conn: HttpURLConnection? = null
         return try {
-            val nowMs = System.currentTimeMillis()
+            val rawNowMs = System.currentTimeMillis()
+            val nowMs = if (hasPcClockOffset) (rawNowMs - pcClockOffsetMs) else rawNowMs
             val payload = JSONObject().apply {
-                put("id", "$nowMs-${(1000..9999).random()}")
+                put("id", "$rawNowMs-${(1000..9999).random()}")
                 put("station", station)
                 put("cmd", cmdId)
                 put("pin", config.cloudPin)
@@ -1972,13 +2010,26 @@ class MainActivity : Activity() {
             if (fromCache && msgTs > 0L && msgTs <= lastAppliedStateTs) {
                 return
             }
-            val ageMs = if (fromCache && msgTs > 0L) {
-                (System.currentTimeMillis() - msgTs).coerceAtLeast(0L)
+
+            val isLiveUpdate = !fromCache || (initialCachedStateTs > 0L && msgTs > initialCachedStateTs)
+            if (isLiveUpdate && msgTs > 0L) {
+                pcClockOffsetMs = System.currentTimeMillis() - msgTs
+                hasPcClockOffset = true
+            }
+
+            val ageMs = if (!isLiveUpdate && msgTs > 0L) {
+                if (hasPcClockOffset) {
+                    val pcNowMs = System.currentTimeMillis() - pcClockOffsetMs
+                    (pcNowMs - msgTs).coerceAtLeast(0L)
+                } else {
+                    val rawAge = (System.currentTimeMillis() - msgTs).coerceAtLeast(0L)
+                    if (rawAge < 8_000L) 0L else rawAge
+                }
             } else {
                 0L
             }
             // Ignore cached messages older than 15 minutes so stale history never overwrites the UI
-            if (fromCache && ageMs > 15 * 60 * 1000L) {
+            if (!isLiveUpdate && ageMs > 15 * 60 * 1000L) {
                 return
             }
             if (msgTs > lastAppliedStateTs) {
@@ -2001,15 +2052,16 @@ class MainActivity : Activity() {
             )
 
             uiHandler.post {
+                lastTickRealtimeMs = SystemClock.elapsedRealtime()
                 setTopConnectionStatus(zState.isOnline || sState.isOnline)
                 if (zState.isOnline) {
-                    cardZgoraj.applyState(zState, forceSyncTime = true, isCachedState = fromCache)
+                    cardZgoraj.applyState(zState, forceSyncTime = true, isCachedState = !isLiveUpdate)
                 } else {
                     cardZgoraj.setOfflineState()
                 }
 
                 if (sState.isOnline) {
-                    cardSpodaj.applyState(sState, forceSyncTime = true, isCachedState = fromCache)
+                    cardSpodaj.applyState(sState, forceSyncTime = true, isCachedState = !isLiveUpdate)
                 } else {
                     cardSpodaj.setOfflineState()
                 }
@@ -4258,8 +4310,12 @@ class StationCardView(
         val prevPersons = currentPersons
 
         setMs = state.setTimeMs
-        if (forceSyncTime || wasOffline || abs(state.remainingTimeMs - remainingMs) > 2000L) {
-            remainingMs = state.remainingTimeMs
+        val clampedRemMs = if (setMs > 0L) min(state.remainingTimeMs, setMs) else state.remainingTimeMs
+        if (forceSyncTime || wasOffline || abs(clampedRemMs - remainingMs) > 1500L) {
+            remainingMs = clampedRemMs
+        }
+        if (setMs > 0L && remainingMs > setMs) {
+            remainingMs = setMs
         }
         currentPersons = state.currentPersons
         maxPersons = state.maxPersons
