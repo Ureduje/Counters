@@ -27,8 +27,8 @@ using Drawing = System.Drawing;
 [assembly: AssemblyDescription("Nadzorna plošča vzpenjače — Zgornja in spodnja postaja")]
 [assembly: AssemblyCompany("Vzpenjača")]
 [assembly: AssemblyProduct("Vzpenjača")]
-[assembly: AssemblyVersion("1.2.3.0")]
-[assembly: AssemblyFileVersion("1.2.3.0")]
+[assembly: AssemblyVersion("1.2.4.0")]
+[assembly: AssemblyFileVersion("1.2.4.0")]
 
 namespace VzpenjacaKontrola
 {
@@ -1560,6 +1560,10 @@ namespace VzpenjacaKontrola
 
         private long _remainingMs = 0;
         private long _setMs = 0;
+        private long _plcExcessRemMs = 0;
+        private bool _hasRideOrigin = false;
+        private DateTime _rideOriginUtc = DateTime.MinValue;
+        private DateTime _lastTimeframeCommandUtc = DateTime.MinValue;
         private int _currentPersons = 0;
         private int _maxPersons = 0;
         private bool _isOnline = false;
@@ -1583,6 +1587,15 @@ namespace VzpenjacaKontrola
         public int MaxPersons { get { return _maxPersons; } }
         public long RemainingMs { get { return _remainingMs; } }
         public long SetMs { get { return _setMs; } }
+        public long RideElapsedMs
+        {
+            get
+            {
+                if (!_isOnline || !_hasRideOrigin) return -1L;
+                long elapsed = (long)(DateTime.UtcNow - _rideOriginUtc).TotalMilliseconds;
+                return elapsed >= 1L ? elapsed : 1L;
+            }
+        }
 
         public double ExtraVerticalHeightReduction
         {
@@ -2229,10 +2242,17 @@ namespace VzpenjacaKontrola
             _countdownTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
             _countdownTimer.Tick += (s, e) =>
             {
-                if (_isOnline && _remainingMs > 0)
+                if (_isOnline)
                 {
-                    _remainingMs = Math.Max(0, _remainingMs - 200);
-                    RenderTime();
+                    if (_remainingMs > 0)
+                    {
+                        _remainingMs = Math.Max(0, _remainingMs - 200);
+                        RenderTime();
+                    }
+                    else if (StateTicked != null)
+                    {
+                        StateTicked();
+                    }
                 }
             };
             _countdownTimer.Start();
@@ -2456,6 +2476,12 @@ namespace VzpenjacaKontrola
             _isCommandBusy = true;
             try
             {
+                bool isTimeframeCmd = (commandId >= 1 && commandId <= 6) || commandId == 10 || commandId == 11;
+                if (isTimeframeCmd)
+                {
+                    _lastTimeframeCommandUtc = DateTime.UtcNow;
+                }
+
                 if (commandId == 9)
                 {
                     const int targetMax = 28;
@@ -2464,12 +2490,18 @@ namespace VzpenjacaKontrola
                     while (t.MaxPersons != targetMax && attempts < 35)
                     {
                         attempts++;
+                        int prevStepMax = t.MaxPersons;
                         int adjCmd = (t.MaxPersons < targetMax) ? 7 : 8;
                         await Task.Delay(40);
                         bool stepFailed = false;
                         try
                         {
                             t = await Client.SendOperatorCommandAsync(adjCmd, 1500);
+                            if (t.MaxPersons == prevStepMax)
+                            {
+                                await Task.Delay(70);
+                                t = await Client.SendOperatorCommandAsync(0, 1500);
+                            }
                             ApplyTelemetry(t, false, true);
                         }
                         catch
@@ -2491,12 +2523,13 @@ namespace VzpenjacaKontrola
                     while (Math.Abs(t.SetTimeMs - targetSetMs) >= 7500 && attempts < 30)
                     {
                         attempts++;
+                        long prevStepSetMs = t.SetTimeMs;
                         long diff = targetSetMs - t.SetTimeMs;
                         int adjCmd;
-                        if (diff >= 210000) adjCmd = 3;         // + 5 min (+300s)
-                        else if (diff <= -210000) adjCmd = 6;   // - 5 min (-300s)
-                        else if (diff >= 37500) adjCmd = 2;     // + 1 min (+60s)
-                        else if (diff <= -37500) adjCmd = 5;    // - 1 min (-60s)
+                        if (diff >= 292500) adjCmd = 3;         // + 5 min (+300s) without overshooting target
+                        else if (diff <= -292500) adjCmd = 6;   // - 5 min (-300s) without overshooting target
+                        else if (diff >= 52500) adjCmd = 2;     // + 1 min (+60s) without overshooting target
+                        else if (diff <= -52500) adjCmd = 5;    // - 1 min (-60s) without overshooting target
                         else if (diff > 0) adjCmd = 1;          // + 15 s
                         else adjCmd = 4;                        // - 15 s
 
@@ -2505,7 +2538,11 @@ namespace VzpenjacaKontrola
                         try
                         {
                             t = await Client.SendOperatorCommandAsync(adjCmd, 1500);
-                            ApplyTelemetry(t, true, true);
+                            if (Math.Abs(t.SetTimeMs - prevStepSetMs) < 5000)
+                            {
+                                await Task.Delay(70);
+                                t = await Client.SendOperatorCommandAsync(0, 1500);
+                            }
                         }
                         catch
                         {
@@ -2516,11 +2553,25 @@ namespace VzpenjacaKontrola
                             await Task.Delay(120);
                         }
                     }
+                    if (isTimeframeCmd)
+                    {
+                        _lastTimeframeCommandUtc = DateTime.UtcNow;
+                    }
                     ApplyTelemetry(t, true, isRemoteCommand);
                 }
                 else
                 {
+                    long prevSetBeforeCmd = _setMs;
                     StationTelemetry t = await Client.SendOperatorCommandAsync(commandId, 1800);
+                    if (isTimeframeCmd && prevSetBeforeCmd > 0 && Math.Abs(t.SetTimeMs - prevSetBeforeCmd) < 5000)
+                    {
+                        await Task.Delay(70);
+                        t = await Client.SendOperatorCommandAsync(0, 1500);
+                    }
+                    if (isTimeframeCmd)
+                    {
+                        _lastTimeframeCommandUtc = DateTime.UtcNow;
+                    }
                     ApplyTelemetry(t, true, isRemoteCommand);
                 }
             }
@@ -2569,34 +2620,79 @@ namespace VzpenjacaKontrola
             int prevPersons = _currentPersons;
             int prevMax = _maxPersons;
 
-            bool timeJump = Math.Abs(t.RemainingTimeMs - _remainingMs) > 2500;
+            long effectiveRemMs = t.RemainingTimeMs;
+            if (t.SetTimeMs > 0)
+            {
+                if (t.RemainingTimeMs <= t.SetTimeMs)
+                {
+                    _plcExcessRemMs = 0;
+                    effectiveRemMs = Math.Max(0L, t.RemainingTimeMs);
+                }
+                else
+                {
+                    if (_plcExcessRemMs <= 0 || (t.RemainingTimeMs - _plcExcessRemMs) > t.SetTimeMs)
+                    {
+                        _plcExcessRemMs = t.RemainingTimeMs - t.SetTimeMs;
+                    }
+                    effectiveRemMs = Math.Max(0L, Math.Min(t.SetTimeMs, t.RemainingTimeMs - _plcExcessRemMs));
+                }
+            }
+            else
+            {
+                _plcExcessRemMs = 0;
+                effectiveRemMs = Math.Max(0L, t.RemainingTimeMs);
+            }
+
+            bool timeJump = Math.Abs(effectiveRemMs - _remainingMs) > 2500;
 
             _setMs = t.SetTimeMs;
-            if (forceSyncTime || wasOffline || Math.Abs(t.RemainingTimeMs - _remainingMs) > 2000)
+            if (forceSyncTime || wasOffline || Math.Abs(effectiveRemMs - _remainingMs) > 2000)
             {
-                _remainingMs = t.RemainingTimeMs;
+                _remainingMs = effectiveRemMs;
+            }
+            if (_setMs > 0 && _remainingMs > _setMs)
+            {
+                _remainingMs = _setMs;
             }
 
             _currentPersons = t.CurrentPersons;
             _maxPersons = t.MaxPersons;
 
-            if (!isFirstLoad && !wasOffline && !forceSyncTime && !_isCommandBusy)
+            if (isFirstLoad)
             {
-                bool clockReset = (t.SetTimeMs > 0) &&
-                                  (t.SetTimeMs == prevSetMs) &&
-                                  (t.RemainingTimeMs - prevRemainingMs > 15000) &&
-                                  (t.RemainingTimeMs >= t.SetTimeMs - 20000);
-                if (clockReset && (t.CurrentPersons == 0 || t.CurrentPersons < prevPersons))
+                if (t.SetTimeMs > 0 && effectiveRemMs >= 1L && effectiveRemMs < t.SetTimeMs)
                 {
-                    if (DepartureDetected != null)
+                    long initialElapsed = t.SetTimeMs - effectiveRemMs;
+                    _rideOriginUtc = DateTime.UtcNow - TimeSpan.FromMilliseconds(initialElapsed);
+                    _hasRideOrigin = true;
+                }
+            }
+            else if (!wasOffline && !forceSyncTime && !_isCommandBusy)
+            {
+                bool recentTimeframeCmd = (DateTime.UtcNow - _lastTimeframeCommandUtc).TotalSeconds < 4.0;
+                bool clockReset = !recentTimeframeCmd &&
+                                  (t.SetTimeMs > 0) &&
+                                  (t.SetTimeMs == prevSetMs) &&
+                                  (effectiveRemMs - prevRemainingMs > 15000) &&
+                                  (effectiveRemMs >= t.SetTimeMs - 20000);
+                if (clockReset)
+                {
+                    long newElapsed = Math.Max(1L, t.SetTimeMs - effectiveRemMs);
+                    _rideOriginUtc = DateTime.UtcNow - TimeSpan.FromMilliseconds(newElapsed);
+                    _hasRideOrigin = true;
+
+                    if (t.CurrentPersons == 0 || t.CurrentPersons < prevPersons)
                     {
-                        DepartureDetected();
-                    }
-                    if (!_isMuted)
-                    {
-                        int nextMinutes = (int)((t.SetTimeMs + 30000) / 60000);
-                        if (nextMinutes <= 0) nextMinutes = 1;
-                        ChimePlayer.SpeakDeparture(nextMinutes);
+                        if (DepartureDetected != null)
+                        {
+                            DepartureDetected();
+                        }
+                        if (!_isMuted)
+                        {
+                            int nextMinutes = (int)((t.SetTimeMs + 30000) / 60000);
+                            if (nextMinutes <= 0) nextMinutes = 1;
+                            ChimePlayer.SpeakDeparture(nextMinutes);
+                        }
                     }
                 }
             }
@@ -2662,6 +2758,11 @@ namespace VzpenjacaKontrola
         private void RenderTime(bool suppressChime = false)
         {
             if (!_isOnline) return;
+
+            if (_setMs > 0 && _remainingMs > _setMs)
+            {
+                _remainingMs = _setMs;
+            }
 
             string formattedTime = FormatMinSec(_remainingMs);
             string formattedInterval = FormatMinSec(_setMs);
@@ -4346,12 +4447,7 @@ namespace VzpenjacaKontrola
             long rideDurationMs = totalSec * 1000L;
 
             bool sOnline = _cardSpodaj != null && _cardSpodaj.IsOnline;
-            long sRem = _cardSpodaj != null ? _cardSpodaj.RemainingMs : 0L;
-            long sSet = _cardSpodaj != null ? _cardSpodaj.SetMs : 0L;
-
             bool zOnline = _cardZgoraj != null && _cardZgoraj.IsOnline;
-            long zRem = _cardZgoraj != null ? _cardZgoraj.RemainingMs : 0L;
-            long zSet = _cardZgoraj != null ? _cardZgoraj.SetMs : 0L;
 
             if (!sOnline && !zOnline)
             {
@@ -4360,8 +4456,8 @@ namespace VzpenjacaKontrola
                 return;
             }
 
-            long sElapsed = (sOnline && sSet >= rideDurationMs && sRem >= 1L && sRem < sSet) ? (sSet - sRem) : -1L;
-            long zElapsed = (zOnline && zSet >= rideDurationMs && zRem >= 1L && zRem < zSet) ? (zSet - zRem) : -1L;
+            long sElapsed = sOnline ? _cardSpodaj.RideElapsedMs : -1L;
+            long zElapsed = zOnline ? _cardZgoraj.RideElapsedMs : -1L;
 
             string activeStationId;
             if (sElapsed > 0L && zElapsed > 0L)
@@ -4517,7 +4613,7 @@ namespace VzpenjacaKontrola
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_EXIT, "Izhod iz programa");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
-                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.2.3");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.2.4");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
             }
         }
@@ -4839,7 +4935,7 @@ namespace VzpenjacaKontrola
                 else if (cmd == IDM_VERSION)
                 {
                     MessageBox.Show(
-                        "Nadzorna plošča vzpenjače\nRazličica 1.2.3\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj + "\nMobilni kanal: " + _config.CloudChannelId,
+                        "Nadzorna plošča vzpenjače\nRazličica 1.2.4\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj + "\nMobilni kanal: " + _config.CloudChannelId,
                         "O programu — Vzpenjača",
                         MessageBoxButton.OK,
                         MessageBoxImage.Information);

@@ -10,8 +10,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Uporabniški namestitveni program (brez skrbniških pravic)")]
 [assembly: AssemblyCompany("Vzpenjača Kontrola")]
 [assembly: AssemblyProduct("Vzpenjača Kontrola")]
-[assembly: AssemblyVersion("1.2.3.0")]
-[assembly: AssemblyFileVersion("1.2.3.0")]
+[assembly: AssemblyVersion("1.2.4.0")]
+[assembly: AssemblyFileVersion("1.2.4.0")]
 
 namespace VzpenjacaInstaller
 {
@@ -318,7 +318,7 @@ namespace VzpenjacaInstaller
                     if (key != null)
                     {
                         key.SetValue("DisplayName", "Nadzorna plošča vzpenjače");
-                        key.SetValue("DisplayVersion", "1.2.3");
+                        key.SetValue("DisplayVersion", "1.2.4");
                         key.SetValue("Publisher", "Vzpenjača Kontrola");
                         key.SetValue("DisplayIcon", targetExePath);
                         key.SetValue("InstallLocation", targetDir);
