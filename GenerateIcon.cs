@@ -5,9 +5,9 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 
-class GenerateIcon
+public class GenerateIcon
 {
-    static void Main(string[] args)
+    public static void Main(string[] args)
     {
         string outIcoPath = args.Length > 0 ? args[0] : "app.ico";
         string outPngPath = args.Length > 1 ? args[1] : null;

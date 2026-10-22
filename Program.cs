@@ -1567,6 +1567,9 @@ namespace VzpenjacaKontrola
         private DateTime _lastTimeframeCommandUtc = DateTime.MinValue;
         private int _currentPersons = 0;
         private int _maxPersons = 0;
+        private readonly System.Collections.Generic.List<long> _hourlyEntryUnixMs = new System.Collections.Generic.List<long>();
+        private readonly object _hourlyGateLock = new object();
+        private readonly string _hourlyPersistenceFilePath;
         private bool _isOnline = false;
         private bool _isPolling = false;
         private bool _isCommandBusy = false;
@@ -1588,6 +1591,17 @@ namespace VzpenjacaKontrola
         public int MaxPersons { get { return _maxPersons; } }
         public long RemainingMs { get { return _remainingMs; } }
         public long SetMs { get { return _setMs; } }
+        public int HourlyEnteredPersons
+        {
+            get
+            {
+                PruneExpiredHourlyEntries();
+                lock (_hourlyGateLock)
+                {
+                    return _hourlyEntryUnixMs.Count;
+                }
+            }
+        }
         public long RideElapsedMs
         {
             get
@@ -1705,6 +1719,10 @@ namespace VzpenjacaKontrola
             int initialCounterViewMode = 0)
         {
             Client = new FunicularClient(ipAddress, 80);
+            string stationKey = (stationName != null && stationName.IndexOf("SPOD", StringComparison.OrdinalIgnoreCase) >= 0) ? "spodaj" : "zgoraj";
+            string appDataDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VzpenjacaKontrola");
+            _hourlyPersistenceFilePath = System.IO.Path.Combine(appDataDir, "hourly_entries_" + stationKey + ".txt");
+            LoadHourlyEntries();
             _currentScale = Math.Max(0.65, Math.Min(1.90, initialScale));
             _isMuted = initialMuted;
             _isDimmed = initialDimmed;
@@ -2266,6 +2284,10 @@ namespace VzpenjacaKontrola
                     {
                         StateTicked();
                     }
+                    if (PruneExpiredHourlyEntries() && TelemetryUpdated != null)
+                    {
+                        TelemetryUpdated(false);
+                    }
                 }
             };
             _countdownTimer.Start();
@@ -2575,11 +2597,16 @@ namespace VzpenjacaKontrola
                 else
                 {
                     long prevSetBeforeCmd = _setMs;
+                    int prevPersonsBeforeCmd = _currentPersons;
                     StationTelemetry t = await Client.SendOperatorCommandAsync(commandId, 1800);
                     if (isTimeframeCmd && prevSetBeforeCmd > 0 && Math.Abs(t.SetTimeMs - prevSetBeforeCmd) < 5000)
                     {
                         await Task.Delay(70);
                         t = await Client.SendOperatorCommandAsync(0, 1500);
+                    }
+                    if (commandId == 8 && prevPersonsBeforeCmd > 0 && t.CurrentPersons < prevPersonsBeforeCmd)
+                    {
+                        RemoveRecentHourlyGateEntries(Math.Min(5, prevPersonsBeforeCmd - t.CurrentPersons));
                     }
                     if (isTimeframeCmd)
                     {
@@ -2672,6 +2699,14 @@ namespace VzpenjacaKontrola
             _currentPersons = t.CurrentPersons;
             _maxPersons = t.MaxPersons;
 
+            bool hourlyChanged = PruneExpiredHourlyEntries();
+            if (!isFirstLoad && !wasOffline && t.CurrentPersons > prevPersons)
+            {
+                int enteredDelta = Math.Min(100, t.CurrentPersons - prevPersons);
+                RecordHourlyGateEntries(enteredDelta);
+                hourlyChanged = true;
+            }
+
             if (isFirstLoad)
             {
                 if (t.SetTimeMs > 0 && effectiveRemMs >= 1L && effectiveRemMs < t.SetTimeMs)
@@ -2717,12 +2752,110 @@ namespace VzpenjacaKontrola
 
             if (!suppressCloudPublish)
             {
-                bool significantChange = isFirstLoad || wasOffline || forceSyncTime || timeJump ||
+                bool significantChange = isFirstLoad || wasOffline || forceSyncTime || timeJump || hourlyChanged ||
                                          prevPersons != _currentPersons || prevMax != _maxPersons || prevSetMs != _setMs;
                 if (TelemetryUpdated != null)
                 {
                     TelemetryUpdated(significantChange);
                 }
+            }
+        }
+
+        private static long CurrentUnixTimeMs()
+        {
+            return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+        }
+
+        private void LoadHourlyEntries()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_hourlyPersistenceFilePath) || !File.Exists(_hourlyPersistenceFilePath))
+                    return;
+                long nowMs = CurrentUnixTimeMs();
+                string[] lines = File.ReadAllLines(_hourlyPersistenceFilePath, Encoding.UTF8);
+                lock (_hourlyGateLock)
+                {
+                    _hourlyEntryUnixMs.Clear();
+                    for (int i = 0; i < lines.Length; i++)
+                    {
+                        long ts;
+                        if (long.TryParse(lines[i].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out ts))
+                        {
+                            if (nowMs - ts <= 3600000L && ts <= nowMs + 60000L)
+                            {
+                                _hourlyEntryUnixMs.Add(ts);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void SaveHourlyEntriesLocked()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_hourlyPersistenceFilePath)) return;
+                string dir = System.IO.Path.GetDirectoryName(_hourlyPersistenceFilePath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+                StringBuilder sb = new StringBuilder(_hourlyEntryUnixMs.Count * 15);
+                for (int i = 0; i < _hourlyEntryUnixMs.Count; i++)
+                {
+                    sb.AppendLine(_hourlyEntryUnixMs[i].ToString(CultureInfo.InvariantCulture));
+                }
+                File.WriteAllText(_hourlyPersistenceFilePath, sb.ToString(), Encoding.UTF8);
+            }
+            catch { }
+        }
+
+        private void RecordHourlyGateEntries(int count)
+        {
+            if (count <= 0) return;
+            long nowMs = CurrentUnixTimeMs();
+            lock (_hourlyGateLock)
+            {
+                _hourlyEntryUnixMs.RemoveAll(ts => (nowMs - ts) > 3600000L);
+                for (int i = 0; i < count; i++)
+                {
+                    _hourlyEntryUnixMs.Add(nowMs);
+                }
+                SaveHourlyEntriesLocked();
+            }
+        }
+
+        private void RemoveRecentHourlyGateEntries(int count)
+        {
+            if (count <= 0) return;
+            long nowMs = CurrentUnixTimeMs();
+            lock (_hourlyGateLock)
+            {
+                _hourlyEntryUnixMs.RemoveAll(ts => (nowMs - ts) > 3600000L);
+                int toRemove = Math.Min(count, _hourlyEntryUnixMs.Count);
+                if (toRemove > 0)
+                {
+                    _hourlyEntryUnixMs.RemoveRange(_hourlyEntryUnixMs.Count - toRemove, toRemove);
+                    SaveHourlyEntriesLocked();
+                }
+            }
+        }
+
+        private bool PruneExpiredHourlyEntries()
+        {
+            long nowMs = CurrentUnixTimeMs();
+            lock (_hourlyGateLock)
+            {
+                int removed = _hourlyEntryUnixMs.RemoveAll(ts => (nowMs - ts) > 3600000L);
+                if (removed > 0)
+                {
+                    SaveHourlyEntriesLocked();
+                    return true;
+                }
+                return false;
             }
         }
 
@@ -3117,15 +3250,17 @@ namespace VzpenjacaKontrola
         {
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "{0}:{1}:{2}:{3}|{4}:{5}:{6}:{7}",
+                "{0}:{1}:{2}:{3}:{4}|{5}:{6}:{7}:{8}:{9}",
                 _cardZgoraj.IsOnline ? 1 : 0,
                 _cardZgoraj.CurrentPersons,
                 _cardZgoraj.MaxPersons,
                 _cardZgoraj.SetMs,
+                _cardZgoraj.HourlyEnteredPersons,
                 _cardSpodaj.IsOnline ? 1 : 0,
                 _cardSpodaj.CurrentPersons,
                 _cardSpodaj.MaxPersons,
-                _cardSpodaj.SetMs);
+                _cardSpodaj.SetMs,
+                _cardSpodaj.HourlyEnteredPersons);
         }
 
         public async Task<bool> PublishStateAsync(bool force)
@@ -3152,7 +3287,7 @@ namespace VzpenjacaKontrola
                 long unixMs = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
                 string payload = string.Format(
                     CultureInfo.InvariantCulture,
-                    "{{\"ts\":{0},\"zOn\":{1},\"zCur\":{2},\"zMax\":{3},\"zRem\":{4},\"zSet\":{5},\"sOn\":{6},\"sCur\":{7},\"sMax\":{8},\"sRem\":{9},\"sSet\":{10}}}",
+                    "{{\"ts\":{0},\"zOn\":{1},\"zCur\":{2},\"zMax\":{3},\"zRem\":{4},\"zSet\":{5},\"sOn\":{6},\"sCur\":{7},\"sMax\":{8},\"sRem\":{9},\"sSet\":{10},\"zHr\":{11},\"sHr\":{12}}}",
                     unixMs,
                     _cardZgoraj.IsOnline ? 1 : 0,
                     _cardZgoraj.CurrentPersons,
@@ -3163,7 +3298,9 @@ namespace VzpenjacaKontrola
                     _cardSpodaj.CurrentPersons,
                     _cardSpodaj.MaxPersons,
                     _cardSpodaj.RemainingMs,
-                    _cardSpodaj.SetMs);
+                    _cardSpodaj.SetMs,
+                    _cardZgoraj.HourlyEnteredPersons,
+                    _cardSpodaj.HourlyEnteredPersons);
 
                 string url = isFirebase
                     ? GetFirebaseUrl(server, _config.CloudChannelId, "state")

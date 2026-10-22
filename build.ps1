@@ -15,10 +15,8 @@ foreach ($f in @("Program.cs", "Installer.cs", "GenerateIcon.cs")) {
 }
 
 Write-Host "1. Ustvarjanje ikone (app.ico)..."
-& $csc /nologo /target:exe /out:GenerateIcon.exe /r:System.Drawing.dll GenerateIcon.cs
-if ($LASTEXITCODE -ne 0) { throw "Napaka pri prevajanju GenerateIcon.cs" }
-.\GenerateIcon.exe app.ico
-Remove-Item .\GenerateIcon.exe -Force -ErrorAction SilentlyContinue
+Add-Type -Path (Join-Path $PSScriptRoot "GenerateIcon.cs") -ReferencedAssemblies System.Drawing
+[GenerateIcon]::Main(@((Join-Path $PSScriptRoot "app.ico")))
 
 Write-Host "2. Prevajanje glavne WPF aplikacije (VzpenjacaKontrola.exe)..."
 $pf = Join-Path $wpfDir "PresentationFramework.dll"

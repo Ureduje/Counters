@@ -88,7 +88,8 @@ data class StationState(
     val currentPersons: Int = 0,
     val maxPersons: Int = 28,
     val remainingTimeMs: Long = 0L,
-    val setTimeMs: Long = 0L
+    val setTimeMs: Long = 0L,
+    val hourlyEnteredPersons: Int = -1
 )
 
 data class SavedChannel(
@@ -2041,14 +2042,16 @@ class MainActivity : Activity() {
                 currentPersons = obj.optInt("zCur", 0),
                 maxPersons = obj.optInt("zMax", 28),
                 remainingTimeMs = max(0L, obj.optLong("zRem", 0L) - ageMs),
-                setTimeMs = max(0L, obj.optLong("zSet", 0L))
+                setTimeMs = max(0L, obj.optLong("zSet", 0L)),
+                hourlyEnteredPersons = obj.optInt("zHr", -1)
             )
             val sState = StationState(
                 isOnline = obj.optInt("sOn", 0) == 1,
                 currentPersons = obj.optInt("sCur", 0),
                 maxPersons = obj.optInt("sMax", 28),
                 remainingTimeMs = max(0L, obj.optLong("sRem", 0L) - ageMs),
-                setTimeMs = max(0L, obj.optLong("sSet", 0L))
+                setTimeMs = max(0L, obj.optLong("sSet", 0L)),
+                hourlyEnteredPersons = obj.optInt("sHr", -1)
             )
 
             uiHandler.post {
@@ -3441,7 +3444,7 @@ class VerticalStationPager(
         }
 
         footerVersionText = TextView(context).apply {
-            text = "v1.2.3"
+            text = "v1.2.4"
             setTextColor(ThemeColors.TextMuted)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.create("sans-serif", Typeface.NORMAL)
@@ -3772,6 +3775,7 @@ class StationCardView(
     private val personsNumberRow: LinearLayout
     private val txtPersonsCurrent: TextView
     private val txtPersonsMax: TextView
+    private val txtHourlyTrafficMetric: TextView
     private val txtSetCapacityValue: TextView
     private val personsProgressTrack: FrameLayout
     private val personsProgressFill: View
@@ -3786,6 +3790,9 @@ class StationCardView(
     private var setMs = 0L
     private var currentPersons = 0
     private var maxPersons = 28
+    private var hourlyEnteredPersons = 0
+    private var hasCloudHourlyCount = false
+    private val localHourlyTimestamps = ArrayList<Long>()
     var isMuted = initialMuted
     var isDimmed = initialDimmed
     var showIntervalBg = initialShowIntervalBg
@@ -4074,6 +4081,18 @@ class StationCardView(
             setTextColor(ThemeColors.TextSecondary)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            setSingleLine(true)
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        txtHourlyTrafficMetric = TextView(context).apply {
+            text = "--"
+            setTextColor(ThemeColors.TextMuted)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(dp(6), dp(2), dp(6), dp(4))
             layoutParams = LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         txtSetCapacityValue = TextView(context).apply {
@@ -4081,7 +4100,9 @@ class StationCardView(
             setTextColor(ThemeColors.TextSecondary)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-            setPadding(dp(8), dp(2), dp(2), dp(4))
+            setSingleLine(true)
+            setPadding(dp(4), dp(2), dp(2), dp(4))
+            layoutParams = LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             setOnClickListener {
                 if (controlsLocked) return@setOnClickListener
                 it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
@@ -4091,6 +4112,7 @@ class StationCardView(
             }
         }
         personsTopRow.addView(lblPersonsHeader)
+        personsTopRow.addView(txtHourlyTrafficMetric)
         personsTopRow.addView(txtSetCapacityValue)
 
         val personsCenterContainer = LinearLayout(context).apply {
@@ -4320,6 +4342,19 @@ class StationCardView(
         currentPersons = state.currentPersons
         maxPersons = state.maxPersons
 
+        val nowWallMs = System.currentTimeMillis()
+        localHourlyTimestamps.removeAll { nowWallMs - it > 3_600_000L }
+        if (!isFirstLoad && !wasOffline && state.currentPersons > prevPersons) {
+            val added = min(100, state.currentPersons - prevPersons)
+            repeat(added) { localHourlyTimestamps.add(nowWallMs) }
+        }
+        if (state.hourlyEnteredPersons >= 0) {
+            hasCloudHourlyCount = true
+            hourlyEnteredPersons = state.hourlyEnteredPersons
+        } else if (!hasCloudHourlyCount) {
+            hourlyEnteredPersons = localHourlyTimestamps.size
+        }
+
         // Obvestilo ob odhodu: detect automatic departure clock reset (matching Program.cs lines 1827-1839)
         val recentlySentCommand = lastCommandSentMs > 0L && (SystemClock.elapsedRealtime() - lastCommandSentMs) < 3500L
         if (!isFirstLoad && !wasOffline && !isCachedState && !recentlySentCommand) {
@@ -4355,6 +4390,8 @@ class StationCardView(
         txtPersonsCurrent.text = "--"
         txtPersonsCurrent.setTextColor(ThemeColors.TextMuted)
         txtPersonsMax.text = "/--"
+        txtHourlyTrafficMetric.text = "--"
+        txtHourlyTrafficMetric.setTextColor(ThemeColors.TextMuted)
         txtSetCapacityValue.text = "Kapaciteta: --"
 
         setFillWidth(timerProgressFill, 0)
@@ -4528,6 +4565,18 @@ class StationCardView(
         txtPersonsCurrent.text = formattedCurrent
         txtPersonsMax.text = "/$formattedMax"
         txtSetCapacityValue.text = "Kapaciteta: $formattedMax"
+
+        val hrCount = max(0, hourlyEnteredPersons)
+        val (metricLabel, metricColor) = when {
+            hrCount < 50 -> "Zelo mirno" to ThemeColors.TextSecondary
+            hrCount <= 100 -> "Mirno" to ThemeColors.AccentBlue
+            hrCount <= 150 -> "Normalno" to ThemeColors.AccentEmerald
+            hrCount <= 200 -> "Gneča" to ThemeColors.AccentAmber
+            hrCount <= 250 -> "Velika gneča" to Color.parseColor("#FB923C")
+            else -> "Ekstremno" to ThemeColors.AccentCoral
+        }
+        txtHourlyTrafficMetric.text = "$metricLabel · ${hrCount}/h"
+        txtHourlyTrafficMetric.setTextColor(metricColor)
 
         val personsZone: Int
         when {
