@@ -3,6 +3,7 @@ package si.vzpenjaca.kontrola
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -50,7 +51,6 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
-import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
@@ -1460,6 +1460,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.statusBarColor = ThemeColors.WindowBg
@@ -4110,25 +4111,6 @@ class StationCardView(
                 it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
                 showHourlyTimeframe = !showHourlyTimeframe
                 renderPersons(suppressChime = true)
-
-                if (isOnline) {
-                    val nowMs = System.currentTimeMillis()
-                    val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
-                    val fromStr = timeFmt.format(Date(nowMs - 3_600_000L))
-                    val toStr = timeFmt.format(Date(nowMs))
-                    val trendRefStr = timeFmt.format(Date(nowMs - 600_000L))
-                    val hrCount = max(0, hourlyEnteredPersons)
-                    val trendDesc = when (hourlyTrend) {
-                        1 -> "narašča (▲)"
-                        -1 -> "pada (▼)"
-                        else -> "miruje (−)"
-                    }
-                    Toast.makeText(
-                        context,
-                        "Časovno okno prometa:\n$fromStr – $toStr (zadnjih 60 min)\nŠtevilo prehodov: $hrCount/h\nTrend: $trendDesc (glede na $trendRefStr)",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
             }
         }
         txtSetCapacityValue = TextView(context).apply {
