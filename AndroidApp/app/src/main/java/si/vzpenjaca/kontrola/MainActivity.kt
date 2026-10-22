@@ -42,6 +42,7 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.WindowInsets
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -1482,6 +1483,35 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
+
+        root.setOnApplyWindowInsetsListener { view, insets ->
+            val leftInset: Int
+            val topInset: Int
+            val rightInset: Int
+            val bottomInset: Int
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val barInsets = insets.getInsets(
+                    WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+                )
+                leftInset = barInsets.left
+                topInset = barInsets.top
+                rightInset = barInsets.right
+                bottomInset = barInsets.bottom
+            } else {
+                @Suppress("DEPRECATION")
+                leftInset = insets.systemWindowInsetLeft
+                @Suppress("DEPRECATION")
+                topInset = insets.systemWindowInsetTop
+                @Suppress("DEPRECATION")
+                rightInset = insets.systemWindowInsetRight
+                @Suppress("DEPRECATION")
+                bottomInset = insets.systemWindowInsetBottom
+            }
+            view.setPadding(leftInset, topInset, rightInset, bottomInset)
+            insets
+        }
+        root.requestApplyInsets()
 
         // Top Bar
         val topBar = buildTopBar()
@@ -3454,7 +3484,7 @@ class VerticalStationPager(
         }
 
         footerVersionText = TextView(context).apply {
-            text = "v1.2.4"
+            text = "v1.2.5"
             setTextColor(ThemeColors.TextMuted)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.create("sans-serif", Typeface.NORMAL)

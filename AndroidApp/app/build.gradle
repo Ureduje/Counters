@@ -5,14 +5,14 @@ plugins {
 
 android {
     namespace 'si.vzpenjaca.kontrola'
-    compileSdk 34
+    compileSdk 36
 
     defaultConfig {
         applicationId "si.vzpenjaca.kontrola"
         minSdk 24
-        targetSdk 34
-        versionCode 9
-        versionName "1.2.4"
+        targetSdk 36
+        versionCode 10
+        versionName "1.2.5"
     }
 
     signingConfigs {
