@@ -89,7 +89,8 @@ data class StationState(
     val maxPersons: Int = 28,
     val remainingTimeMs: Long = 0L,
     val setTimeMs: Long = 0L,
-    val hourlyEnteredPersons: Int = -1
+    val hourlyEnteredPersons: Int = -1,
+    val hourlyTrend: Int? = null
 )
 
 data class SavedChannel(
@@ -2037,13 +2038,17 @@ class MainActivity : Activity() {
                 lastAppliedStateTs = msgTs
             }
 
+            val zTr = if (obj.has("zTr")) obj.optInt("zTr", 0) else null
+            val sTr = if (obj.has("sTr")) obj.optInt("sTr", 0) else null
+
             val zState = StationState(
                 isOnline = obj.optInt("zOn", 0) == 1,
                 currentPersons = obj.optInt("zCur", 0),
                 maxPersons = obj.optInt("zMax", 28),
                 remainingTimeMs = max(0L, obj.optLong("zRem", 0L) - ageMs),
                 setTimeMs = max(0L, obj.optLong("zSet", 0L)),
-                hourlyEnteredPersons = obj.optInt("zHr", -1)
+                hourlyEnteredPersons = obj.optInt("zHr", -1),
+                hourlyTrend = zTr
             )
             val sState = StationState(
                 isOnline = obj.optInt("sOn", 0) == 1,
@@ -2051,7 +2056,8 @@ class MainActivity : Activity() {
                 maxPersons = obj.optInt("sMax", 28),
                 remainingTimeMs = max(0L, obj.optLong("sRem", 0L) - ageMs),
                 setTimeMs = max(0L, obj.optLong("sSet", 0L)),
-                hourlyEnteredPersons = obj.optInt("sHr", -1)
+                hourlyEnteredPersons = obj.optInt("sHr", -1),
+                hourlyTrend = sTr
             )
 
             uiHandler.post {
@@ -3791,6 +3797,7 @@ class StationCardView(
     private var currentPersons = 0
     private var maxPersons = 28
     private var hourlyEnteredPersons = 0
+    private var hourlyTrend = 0
     private var hasCloudHourlyCount = false
     private val localHourlyTimestamps = ArrayList<Long>()
     var isMuted = initialMuted
@@ -3820,6 +3827,7 @@ class StationCardView(
         get() = setMs
 
     init {
+        loadPersistedLocalHourlyTimestamps()
         orientation = VERTICAL
         val pad = dp(12)
         setPadding(pad, dp(10), pad, dp(10))
@@ -4316,6 +4324,19 @@ class StationCardView(
         } else {
             syncSingleFunicularPosition()
         }
+        if (!hasCloudHourlyCount && isOnline) {
+            val nowWallMs = System.currentTimeMillis()
+            val beforeCount = localHourlyTimestamps.size
+            localHourlyTimestamps.removeAll { nowWallMs - it > 4_200_000L }
+            val newHr = localHourlyTimestamps.count { nowWallMs - it <= 3_600_000L }
+            val newTr = computeLocalTrend(nowWallMs)
+            if (beforeCount != localHourlyTimestamps.size || newHr != hourlyEnteredPersons || newTr != hourlyTrend) {
+                hourlyEnteredPersons = newHr
+                hourlyTrend = newTr
+                savePersistedLocalHourlyTimestamps()
+                renderPersons(suppressChime = true)
+            }
+        }
     }
 
     fun applyState(state: StationState, forceSyncTime: Boolean, isCachedState: Boolean = false) {
@@ -4343,16 +4364,24 @@ class StationCardView(
         maxPersons = state.maxPersons
 
         val nowWallMs = System.currentTimeMillis()
-        localHourlyTimestamps.removeAll { nowWallMs - it > 3_600_000L }
+        localHourlyTimestamps.removeAll { nowWallMs - it > 4_200_000L }
+        var timestampsChanged = false
         if (!isFirstLoad && !wasOffline && state.currentPersons > prevPersons) {
             val added = min(100, state.currentPersons - prevPersons)
             repeat(added) { localHourlyTimestamps.add(nowWallMs) }
+            timestampsChanged = true
         }
         if (state.hourlyEnteredPersons >= 0) {
             hasCloudHourlyCount = true
             hourlyEnteredPersons = state.hourlyEnteredPersons
+            hourlyTrend = state.hourlyTrend ?: computeLocalTrend(nowWallMs)
+            savePersistedLocalHourlyTimestamps()
         } else if (!hasCloudHourlyCount) {
-            hourlyEnteredPersons = localHourlyTimestamps.size
+            hourlyEnteredPersons = localHourlyTimestamps.count { nowWallMs - it <= 3_600_000L }
+            hourlyTrend = computeLocalTrend(nowWallMs)
+            if (timestampsChanged) {
+                savePersistedLocalHourlyTimestamps()
+            }
         }
 
         // Obvestilo ob odhodu: detect automatic departure clock reset (matching Program.cs lines 1827-1839)
@@ -4558,6 +4587,56 @@ class StationCardView(
         }
     }
 
+    private fun loadPersistedLocalHourlyTimestamps() {
+        try {
+            val prefs = context.getSharedPreferences("vzpenjaca_hourly_cache", Context.MODE_PRIVATE)
+            val raw = prefs.getString("timestamps_$stationId", null) ?: ""
+            val now = System.currentTimeMillis()
+            localHourlyTimestamps.clear()
+            if (raw.isNotEmpty()) {
+                val parts = raw.split(",")
+                for (p in parts) {
+                    val t = p.toLongOrNull() ?: continue
+                    if (now - t <= 4_200_000L) {
+                        localHourlyTimestamps.add(t)
+                    }
+                }
+            }
+            val storedHr = prefs.getInt("hourly_$stationId", -1)
+            val storedTr = prefs.getInt("trend_$stationId", 0)
+            if (storedHr >= 0) {
+                hourlyEnteredPersons = storedHr
+                hourlyTrend = storedTr
+            } else {
+                hourlyEnteredPersons = localHourlyTimestamps.count { now - it <= 3_600_000L }
+                hourlyTrend = computeLocalTrend(now)
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun savePersistedLocalHourlyTimestamps() {
+        try {
+            val prefs = context.getSharedPreferences("vzpenjaca_hourly_cache", Context.MODE_PRIVATE)
+            val now = System.currentTimeMillis()
+            val valid = localHourlyTimestamps.filter { now - it <= 4_200_000L }
+            prefs.edit()
+                .putString("timestamps_$stationId", valid.joinToString(","))
+                .putInt("hourly_$stationId", hourlyEnteredPersons)
+                .putInt("trend_$stationId", hourlyTrend)
+                .apply()
+        } catch (_: Exception) {}
+    }
+
+    private fun computeLocalTrend(nowWallMs: Long): Int {
+        val currentCount = localHourlyTimestamps.count { nowWallMs - it <= 3_600_000L }
+        val pastCount = localHourlyTimestamps.count { nowWallMs - it in (600_000L..4_200_000L) }
+        return when {
+            currentCount > pastCount -> 1
+            currentCount < pastCount -> -1
+            else -> 0
+        }
+    }
+
     private fun renderPersons(suppressChime: Boolean) {
         if (!isOnline) return
         val formattedCurrent = String.format(Locale.US, "%02d", currentPersons)
@@ -4575,7 +4654,12 @@ class StationCardView(
             hrCount <= 250 -> "Velika gneča" to Color.parseColor("#FB923C")
             else -> "Ekstremno" to ThemeColors.AccentCoral
         }
-        txtHourlyTrafficMetric.text = "$metricLabel · ${hrCount}/h"
+        val trendSymbol = when (hourlyTrend) {
+            1 -> "▲"
+            -1 -> "▼"
+            else -> "−"
+        }
+        txtHourlyTrafficMetric.text = "$metricLabel · ${hrCount}/h $trendSymbol"
         txtHourlyTrafficMetric.setTextColor(metricColor)
 
         val personsZone: Int

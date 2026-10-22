@@ -1591,6 +1591,10 @@ namespace VzpenjacaKontrola
         public int MaxPersons { get { return _maxPersons; } }
         public long RemainingMs { get { return _remainingMs; } }
         public long SetMs { get { return _setMs; } }
+        private const long HourlyWindowMs = 3600000L;
+        private const long TrendWindowMs = 4200000L;
+        private const long TenMinutesMs = 600000L;
+
         public int HourlyEnteredPersons
         {
             get
@@ -1598,7 +1602,45 @@ namespace VzpenjacaKontrola
                 PruneExpiredHourlyEntries();
                 lock (_hourlyGateLock)
                 {
-                    return _hourlyEntryUnixMs.Count;
+                    long nowMs = CurrentUnixTimeMs();
+                    int count = 0;
+                    for (int i = 0; i < _hourlyEntryUnixMs.Count; i++)
+                    {
+                        if ((nowMs - _hourlyEntryUnixMs[i]) <= HourlyWindowMs)
+                        {
+                            count++;
+                        }
+                    }
+                    return count;
+                }
+            }
+        }
+
+        public int HourlyTrend
+        {
+            get
+            {
+                PruneExpiredHourlyEntries();
+                lock (_hourlyGateLock)
+                {
+                    long nowMs = CurrentUnixTimeMs();
+                    int currentCount = 0;
+                    int pastCount = 0;
+                    for (int i = 0; i < _hourlyEntryUnixMs.Count; i++)
+                    {
+                        long age = nowMs - _hourlyEntryUnixMs[i];
+                        if (age <= HourlyWindowMs)
+                        {
+                            currentCount++;
+                        }
+                        if (age >= TenMinutesMs && age <= TrendWindowMs)
+                        {
+                            pastCount++;
+                        }
+                    }
+                    if (currentCount > pastCount) return 1;
+                    if (currentCount < pastCount) return -1;
+                    return 0;
                 }
             }
         }
@@ -2782,7 +2824,7 @@ namespace VzpenjacaKontrola
                         long ts;
                         if (long.TryParse(lines[i].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out ts))
                         {
-                            if (nowMs - ts <= 3600000L && ts <= nowMs + 60000L)
+                            if (nowMs - ts <= TrendWindowMs && ts <= nowMs + 60000L)
                             {
                                 _hourlyEntryUnixMs.Add(ts);
                             }
@@ -2819,7 +2861,7 @@ namespace VzpenjacaKontrola
             long nowMs = CurrentUnixTimeMs();
             lock (_hourlyGateLock)
             {
-                _hourlyEntryUnixMs.RemoveAll(ts => (nowMs - ts) > 3600000L);
+                _hourlyEntryUnixMs.RemoveAll(ts => (nowMs - ts) > TrendWindowMs);
                 for (int i = 0; i < count; i++)
                 {
                     _hourlyEntryUnixMs.Add(nowMs);
@@ -2834,7 +2876,7 @@ namespace VzpenjacaKontrola
             long nowMs = CurrentUnixTimeMs();
             lock (_hourlyGateLock)
             {
-                _hourlyEntryUnixMs.RemoveAll(ts => (nowMs - ts) > 3600000L);
+                _hourlyEntryUnixMs.RemoveAll(ts => (nowMs - ts) > TrendWindowMs);
                 int toRemove = Math.Min(count, _hourlyEntryUnixMs.Count);
                 if (toRemove > 0)
                 {
@@ -2849,7 +2891,7 @@ namespace VzpenjacaKontrola
             long nowMs = CurrentUnixTimeMs();
             lock (_hourlyGateLock)
             {
-                int removed = _hourlyEntryUnixMs.RemoveAll(ts => (nowMs - ts) > 3600000L);
+                int removed = _hourlyEntryUnixMs.RemoveAll(ts => (nowMs - ts) > TrendWindowMs);
                 if (removed > 0)
                 {
                     SaveHourlyEntriesLocked();
@@ -3250,17 +3292,19 @@ namespace VzpenjacaKontrola
         {
             return string.Format(
                 CultureInfo.InvariantCulture,
-                "{0}:{1}:{2}:{3}:{4}|{5}:{6}:{7}:{8}:{9}",
+                "{0}:{1}:{2}:{3}:{4}:{5}|{6}:{7}:{8}:{9}:{10}:{11}",
                 _cardZgoraj.IsOnline ? 1 : 0,
                 _cardZgoraj.CurrentPersons,
                 _cardZgoraj.MaxPersons,
                 _cardZgoraj.SetMs,
                 _cardZgoraj.HourlyEnteredPersons,
+                _cardZgoraj.HourlyTrend,
                 _cardSpodaj.IsOnline ? 1 : 0,
                 _cardSpodaj.CurrentPersons,
                 _cardSpodaj.MaxPersons,
                 _cardSpodaj.SetMs,
-                _cardSpodaj.HourlyEnteredPersons);
+                _cardSpodaj.HourlyEnteredPersons,
+                _cardSpodaj.HourlyTrend);
         }
 
         public async Task<bool> PublishStateAsync(bool force)
@@ -3287,7 +3331,7 @@ namespace VzpenjacaKontrola
                 long unixMs = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
                 string payload = string.Format(
                     CultureInfo.InvariantCulture,
-                    "{{\"ts\":{0},\"zOn\":{1},\"zCur\":{2},\"zMax\":{3},\"zRem\":{4},\"zSet\":{5},\"sOn\":{6},\"sCur\":{7},\"sMax\":{8},\"sRem\":{9},\"sSet\":{10},\"zHr\":{11},\"sHr\":{12}}}",
+                    "{{\"ts\":{0},\"zOn\":{1},\"zCur\":{2},\"zMax\":{3},\"zRem\":{4},\"zSet\":{5},\"sOn\":{6},\"sCur\":{7},\"sMax\":{8},\"sRem\":{9},\"sSet\":{10},\"zHr\":{11},\"sHr\":{12},\"zTr\":{13},\"sTr\":{14}}}",
                     unixMs,
                     _cardZgoraj.IsOnline ? 1 : 0,
                     _cardZgoraj.CurrentPersons,
@@ -3300,7 +3344,9 @@ namespace VzpenjacaKontrola
                     _cardSpodaj.RemainingMs,
                     _cardSpodaj.SetMs,
                     _cardZgoraj.HourlyEnteredPersons,
-                    _cardSpodaj.HourlyEnteredPersons);
+                    _cardSpodaj.HourlyEnteredPersons,
+                    _cardZgoraj.HourlyTrend,
+                    _cardSpodaj.HourlyTrend);
 
                 string url = isFirebase
                     ? GetFirebaseUrl(server, _config.CloudChannelId, "state")
