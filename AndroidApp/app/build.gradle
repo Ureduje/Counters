@@ -15,9 +15,19 @@ android {
         versionName "1.2.4"
     }
 
+    signingConfigs {
+        release {
+            storeFile file('../vzpenjaca-release.jks')
+            storePassword 'vzpenjacakontrola2026'
+            keyAlias 'vzpenjaca'
+            keyPassword 'vzpenjacakontrola2026'
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig signingConfigs.release
         }
     }
 
