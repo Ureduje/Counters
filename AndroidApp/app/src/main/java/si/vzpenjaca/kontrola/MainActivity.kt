@@ -50,6 +50,7 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
+import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
@@ -58,6 +59,8 @@ import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.File
 import java.io.InputStreamReader
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -3799,6 +3802,7 @@ class StationCardView(
     private var hourlyEnteredPersons = 0
     private var hourlyTrend = 0
     private var hasCloudHourlyCount = false
+    private var showHourlyTimeframe = false
     private val localHourlyTimestamps = ArrayList<Long>()
     var isMuted = initialMuted
     var isDimmed = initialDimmed
@@ -4102,6 +4106,30 @@ class StationCardView(
             ellipsize = TextUtils.TruncateAt.END
             setPadding(dp(6), dp(2), dp(6), dp(4))
             layoutParams = LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener {
+                it.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                showHourlyTimeframe = !showHourlyTimeframe
+                renderPersons(suppressChime = true)
+
+                if (isOnline) {
+                    val nowMs = System.currentTimeMillis()
+                    val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+                    val fromStr = timeFmt.format(Date(nowMs - 3_600_000L))
+                    val toStr = timeFmt.format(Date(nowMs))
+                    val trendRefStr = timeFmt.format(Date(nowMs - 600_000L))
+                    val hrCount = max(0, hourlyEnteredPersons)
+                    val trendDesc = when (hourlyTrend) {
+                        1 -> "narašča (▲)"
+                        -1 -> "pada (▼)"
+                        else -> "miruje (−)"
+                    }
+                    Toast.makeText(
+                        context,
+                        "Časovno okno prometa:\n$fromStr – $toStr (zadnjih 60 min)\nŠtevilo prehodov: $hrCount/h\nTrend: $trendDesc (glede na $trendRefStr)",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
         }
         txtSetCapacityValue = TextView(context).apply {
             text = "Kapaciteta: --"
@@ -4334,6 +4362,12 @@ class StationCardView(
                 hourlyEnteredPersons = newHr
                 hourlyTrend = newTr
                 savePersistedLocalHourlyTimestamps()
+                renderPersons(suppressChime = true)
+            }
+        }
+        if (showHourlyTimeframe && isOnline) {
+            val nowSec = System.currentTimeMillis() / 1000L
+            if (nowSec % 5L == 0L) {
                 renderPersons(suppressChime = true)
             }
         }
@@ -4659,7 +4693,14 @@ class StationCardView(
             -1 -> "▼"
             else -> "−"
         }
-        txtHourlyTrafficMetric.text = "$metricLabel · ${hrCount}/h $trendSymbol"
+        val prefix = if (showHourlyTimeframe) {
+            val nowMs = System.currentTimeMillis()
+            val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
+            "${timeFmt.format(Date(nowMs - 3_600_000L))}–${timeFmt.format(Date(nowMs))}"
+        } else {
+            metricLabel
+        }
+        txtHourlyTrafficMetric.text = "$prefix · ${hrCount}/h $trendSymbol"
         txtHourlyTrafficMetric.setTextColor(metricColor)
 
         val personsZone: Int
