@@ -1,194 +1,287 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
+using System.Windows;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Xml.Linq;
 
+/// <summary>
+/// Generates multi-resolution Windows app icon (app.ico) inherited directly
+/// from the Android application vector drawable (AndroidApp/app/src/main/res/drawable/ic_launcher.xml).
+/// </summary>
 public class GenerateIcon
 {
+    private class VectorPathItem
+    {
+        public Geometry Geometry;
+        public Brush FillBrush;
+        public Pen StrokePen;
+    }
+
+    private class VectorDrawableData
+    {
+        public float ViewportWidth = 108f;
+        public float ViewportHeight = 108f;
+        public List<VectorPathItem> Paths = new List<VectorPathItem>();
+    }
+
+    [STAThread]
     public static void Main(string[] args)
     {
-        string outIcoPath = args.Length > 0 ? args[0] : "app.ico";
-        string outPngPath = args.Length > 1 ? args[1] : null;
+        string outIcoPath = args.Length > 0 && !string.IsNullOrWhiteSpace(args[0]) ? args[0] : "app.ico";
+        string xmlSourcePath = args.Length > 1 && !string.IsNullOrWhiteSpace(args[1]) ? args[1] : null;
+        string outPngPreview = args.Length > 2 && !string.IsNullOrWhiteSpace(args[2]) ? args[2] : null;
 
-        int[] iconSizes = new int[] { 256, 64, 48, 32, 16 };
+        string resolvedXml = FindAndroidIconXml(xmlSourcePath);
+        if (string.IsNullOrEmpty(resolvedXml) || !File.Exists(resolvedXml))
+        {
+            throw new FileNotFoundException("Datoteke ikone Android aplikacije (ic_launcher.xml) ni mogoče najti: " + (xmlSourcePath ?? "ic_launcher.xml"));
+        }
+
+        Console.WriteLine("Prevzem ikone iz Android aplikacije: " + resolvedXml);
+        VectorDrawableData vectorData = ParseVectorDrawable(resolvedXml);
+        Console.WriteLine("Nalozenih poti (vector paths): " + vectorData.Paths.Count + " (viewport: " + vectorData.ViewportWidth + "x" + vectorData.ViewportHeight + ")");
+
+        // Standard Windows icon sizes (Vista - Windows 11)
+        int[] iconSizes = new int[] { 256, 128, 64, 48, 32, 24, 16 };
         List<byte[]> encodedPngs = new List<byte[]>();
 
         foreach (int sz in iconSizes)
         {
-            using (Bitmap bmp = RenderUnifiedIcon(sz))
-            using (MemoryStream ms = new MemoryStream())
-            {
-                bmp.Save(ms, ImageFormat.Png);
-                encodedPngs.Add(ms.ToArray());
-            }
+            byte[] pngBytes = RenderIconFramePng(vectorData, sz);
+            encodedPngs.Add(pngBytes);
         }
 
         SaveMultiSizeIcon(iconSizes, encodedPngs, outIcoPath);
+        Console.WriteLine("Uspešno zgrajena večstopenjska ikona: " + outIcoPath + " (" + new FileInfo(outIcoPath).Length + " bajtov)");
 
-        if (!string.IsNullOrEmpty(outPngPath))
+        if (!string.IsNullOrEmpty(outPngPreview))
         {
-            using (Bitmap previewBmp = RenderUnifiedIcon(512))
-            {
-                previewBmp.Save(outPngPath, ImageFormat.Png);
-            }
+            byte[] previewPng = RenderIconFramePng(vectorData, 512);
+            File.WriteAllBytes(outPngPreview, previewPng);
+            Console.WriteLine("Ustvarjen predogled ikone: " + outPngPreview);
         }
     }
 
-    static Bitmap RenderUnifiedIcon(int pixelSize)
+    public static string FindAndroidIconXml(string explicitPath)
     {
-        Bitmap bmp = new Bitmap(pixelSize, pixelSize, PixelFormat.Format32bppArgb);
-        using (Graphics g = Graphics.FromImage(bmp))
+        if (!string.IsNullOrEmpty(explicitPath) && File.Exists(explicitPath))
+            return Path.GetFullPath(explicitPath);
+
+        string[] candidates = new string[]
         {
-            g.SmoothingMode = SmoothingMode.HighQuality;
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.Clear(Color.Transparent);
+            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"AndroidApp\app\src\main\res\drawable\ic_launcher.xml"),
+            Path.Combine(Directory.GetCurrentDirectory(), @"AndroidApp\app\src\main\res\drawable\ic_launcher.xml"),
+            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\AndroidApp\app\src\main\res\drawable\ic_launcher.xml"),
+            @"AndroidApp\app\src\main\res\drawable\ic_launcher.xml"
+        };
 
-            // Unified 108x108 coordinate space shared across PC, Android, and Wear OS
-            float s = pixelSize / 108f;
-
-            // 1. Rounded Dark Slate Badge Background
-            RectangleF bgRect = new RectangleF(4f * s, 4f * s, 100f * s, 100f * s);
-            RectangleF borderRect = new RectangleF(5.2f * s, 5.2f * s, 97.6f * s, 97.6f * s);
-            using (GraphicsPath bgPath = RoundedRectF(bgRect, 24f * s))
-            using (GraphicsPath borderPath = RoundedRectF(borderRect, 22.8f * s))
-            using (LinearGradientBrush bgBrush = new LinearGradientBrush(
-                bgRect,
-                Color.FromArgb(20, 29, 47),   // #141D2F
-                Color.FromArgb(11, 15, 23),   // #0B0F17
-                LinearGradientMode.Vertical))
-            using (Pen bgBorderPen = new Pen(Color.FromArgb(34, 52, 78), Math.Max(1f, 2.2f * s))) // #22344E
-            {
-                g.FillPath(bgBrush, bgPath);
-                g.DrawPath(bgBorderPen, borderPath);
-            }
-
-            // 2. Top Display Card (Combines Time on left + Number on right)
-            RectangleF cardRect = new RectangleF(21f * s, 19f * s, 66f * s, 28f * s);
-            using (GraphicsPath cardPath = RoundedRectF(cardRect, 9f * s))
-            using (SolidBrush cardBrush = new SolidBrush(Color.FromArgb(24, 35, 54))) // #182336
-            using (Pen cardPen = new Pen(Color.FromArgb(56, 189, 248), Math.Max(1.2f, 3.0f * s))) // #38BDF8
-            {
-                g.FillPath(cardBrush, cardPath);
-                g.DrawPath(cardPen, cardPen.Width > 0 ? cardPath : cardPath);
-            }
-
-            // Center vertical divider inside top display card
-            using (Pen divPen = new Pen(Color.FromArgb(42, 60, 88), Math.Max(1f, 2.0f * s))) // #2A3C58
-            {
-                divPen.StartCap = LineCap.Round;
-                divPen.EndCap = LineCap.Round;
-                g.DrawLine(divPen, 54f * s, 24.5f * s, 54f * s, 41.5f * s);
-            }
-
-            // 2a. Left Half: Stopwatch / Clock (Time Countdown)
-            float clockCx = 38f * s;
-            float clockCy = 34.2f * s;
-            float clockR = 7.4f * s;
-
-            using (Pen clockRingPen = new Pen(Color.FromArgb(56, 189, 248), Math.Max(1.1f, 2.4f * s))) // #38BDF8
-            {
-                clockRingPen.StartCap = LineCap.Round;
-                clockRingPen.EndCap = LineCap.Round;
-                g.DrawEllipse(clockRingPen, clockCx - clockR, clockCy - clockR, clockR * 2f, clockR * 2f);
-                // Top stopwatch crown button
-                g.DrawLine(clockRingPen, 36f * s, 24.2f * s, 40f * s, 24.2f * s);
-            }
-
-            using (Pen handPen = new Pen(Color.FromArgb(248, 250, 252), Math.Max(1.1f, 2.3f * s))) // #F8FAFC
-            {
-                handPen.StartCap = LineCap.Round;
-                handPen.EndCap = LineCap.Round;
-                handPen.LineJoin = LineJoin.Round;
-                PointF[] handPts = new PointF[]
-                {
-                    new PointF(clockCx, clockCy - 4.1f * s),
-                    new PointF(clockCx, clockCy),
-                    new PointF(clockCx + 3.4f * s, clockCy + 2.2f * s)
-                };
-                g.DrawLines(handPen, handPts);
-            }
-
-            // 2b. Right Half: Bold "+1" Number Counter
-            using (Pen numPen = new Pen(Color.FromArgb(16, 185, 129), Math.Max(1.3f, 3.5f * s))) // #10B981
-            {
-                numPen.StartCap = LineCap.Round;
-                numPen.EndCap = LineCap.Round;
-                numPen.LineJoin = LineJoin.Round;
-
-                // "+" symbol
-                g.DrawLine(numPen, 63.8f * s, 29f * s, 63.8f * s, 37.4f * s);
-                g.DrawLine(numPen, 59.6f * s, 33.2f * s, 68f * s, 33.2f * s);
-
-                // "1" digit
-                PointF[] onePts = new PointF[]
-                {
-                    new PointF(72.8f * s, 30.4f * s),
-                    new PointF(76.5f * s, 27.7f * s),
-                    new PointF(76.5f * s, 38.7f * s)
-                };
-                g.DrawLines(numPen, onePts);
-            }
-
-            // 3. Bottom Half: Simple Access Gate
-            RectangleF leftPillar = new RectangleF(24f * s, 56f * s, 12f * s, 30f * s);
-            RectangleF rightPillar = new RectangleF(72f * s, 56f * s, 12f * s, 30f * s);
-            using (GraphicsPath lpPath = RoundedRectF(leftPillar, 4.5f * s))
-            using (GraphicsPath rpPath = RoundedRectF(rightPillar, 4.5f * s))
-            using (SolidBrush pillarBrush = new SolidBrush(Color.FromArgb(56, 189, 248))) // #38BDF8
-            {
-                g.FillPath(pillarBrush, lpPath);
-                g.FillPath(pillarBrush, rpPath);
-            }
-
-            // Dark halo behind barrier arm where it crosses the left pillar
-            using (Pen armHaloPen = new Pen(Color.FromArgb(11, 15, 23), Math.Max(2f, 10.2f * s)))
-            {
-                armHaloPen.StartCap = LineCap.Round;
-                armHaloPen.EndCap = LineCap.Round;
-                g.DrawLine(armHaloPen, 30f * s, 72f * s, 66f * s, 59f * s);
-            }
-
-            // Gate Barrier Arm (#10B981 Emerald)
-            using (Pen armPen = new Pen(Color.FromArgb(16, 185, 129), Math.Max(1.6f, 7.0f * s)))
-            {
-                armPen.StartCap = LineCap.Round;
-                armPen.EndCap = LineCap.Round;
-                g.DrawLine(armPen, 30f * s, 72f * s, 66f * s, 59f * s);
-            }
-
-            // Barrier Pivot Point
-            float pivotR = 2.6f * s;
-            using (SolidBrush pivotBrush = new SolidBrush(Color.FromArgb(11, 15, 23)))
-            {
-                g.FillEllipse(pivotBrush, 30f * s - pivotR, 72f * s - pivotR, pivotR * 2f, pivotR * 2f);
-            }
+        foreach (string candidate in candidates)
+        {
+            if (File.Exists(candidate))
+                return Path.GetFullPath(candidate);
         }
-        return bmp;
+
+        return null;
     }
 
-    static GraphicsPath RoundedRectF(RectangleF bounds, float radius)
+    private static VectorDrawableData ParseVectorDrawable(string xmlPath)
     {
-        float d = radius * 2f;
-        GraphicsPath path = new GraphicsPath();
-        path.AddArc(bounds.Left, bounds.Top, d, d, 180, 90);
-        path.AddArc(bounds.Right - d, bounds.Top, d, d, 270, 90);
-        path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
-        path.AddArc(bounds.Left, bounds.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
+        XDocument doc = XDocument.Load(xmlPath);
+        XElement vectorElem = doc.Root;
+        if (vectorElem == null) throw new InvalidOperationException("Neveljaven korenski element v " + xmlPath);
+
+        XNamespace androidNs = "http://schemas.android.com/apk/res/android";
+        VectorDrawableData data = new VectorDrawableData();
+
+        string vpWStr = GetAttr(vectorElem, androidNs, "viewportWidth");
+        string vpHStr = GetAttr(vectorElem, androidNs, "viewportHeight");
+
+        if (!string.IsNullOrEmpty(vpWStr)) float.TryParse(vpWStr, NumberStyles.Float, CultureInfo.InvariantCulture, out data.ViewportWidth);
+        if (!string.IsNullOrEmpty(vpHStr)) float.TryParse(vpHStr, NumberStyles.Float, CultureInfo.InvariantCulture, out data.ViewportHeight);
+
+        foreach (XElement pathElem in vectorElem.Descendants())
+        {
+            if (!pathElem.Name.LocalName.Equals("path", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            string pathData = GetAttr(pathElem, androidNs, "pathData");
+            if (string.IsNullOrWhiteSpace(pathData))
+                continue;
+
+            Geometry geom = Geometry.Parse(pathData);
+            geom.Freeze();
+
+            Brush fillBrush = null;
+            string fillColor = GetAttr(pathElem, androidNs, "fillColor");
+            if (!string.IsNullOrWhiteSpace(fillColor))
+            {
+                Color c = ParseColor(fillColor);
+                if (c.A > 0)
+                {
+                    SolidColorBrush scb = new SolidColorBrush(c);
+                    scb.Freeze();
+                    fillBrush = scb;
+                }
+            }
+
+            Pen strokePen = null;
+            string strokeColor = GetAttr(pathElem, androidNs, "strokeColor");
+            if (!string.IsNullOrWhiteSpace(strokeColor))
+            {
+                Color sc = ParseColor(strokeColor);
+                if (sc.A > 0)
+                {
+                    SolidColorBrush strokeBrush = new SolidColorBrush(sc);
+                    strokeBrush.Freeze();
+
+                    float strokeWidth = 1f;
+                    string strokeWidthStr = GetAttr(pathElem, androidNs, "strokeWidth");
+                    if (!string.IsNullOrEmpty(strokeWidthStr))
+                    {
+                        float.TryParse(strokeWidthStr, NumberStyles.Float, CultureInfo.InvariantCulture, out strokeWidth);
+                    }
+
+                    strokePen = new Pen(strokeBrush, strokeWidth);
+
+                    string cap = GetAttr(pathElem, androidNs, "strokeLineCap");
+                    if (string.Equals(cap, "round", StringComparison.OrdinalIgnoreCase))
+                    {
+                        strokePen.StartLineCap = PenLineCap.Round;
+                        strokePen.EndLineCap = PenLineCap.Round;
+                    }
+                    else if (string.Equals(cap, "square", StringComparison.OrdinalIgnoreCase))
+                    {
+                        strokePen.StartLineCap = PenLineCap.Square;
+                        strokePen.EndLineCap = PenLineCap.Square;
+                    }
+
+                    string join = GetAttr(pathElem, androidNs, "strokeLineJoin");
+                    if (string.Equals(join, "round", StringComparison.OrdinalIgnoreCase))
+                    {
+                        strokePen.LineJoin = PenLineJoin.Round;
+                    }
+                    else if (string.Equals(join, "bevel", StringComparison.OrdinalIgnoreCase))
+                    {
+                        strokePen.LineJoin = PenLineJoin.Bevel;
+                    }
+
+                    strokePen.Freeze();
+                }
+            }
+
+            data.Paths.Add(new VectorPathItem
+            {
+                Geometry = geom,
+                FillBrush = fillBrush,
+                StrokePen = strokePen
+            });
+        }
+
+        return data;
     }
 
-    static void SaveMultiSizeIcon(int[] sizes, List<byte[]> pngDataList, string filePath)
+    private static string GetAttr(XElement elem, XNamespace ns, string localName)
+    {
+        XAttribute attr = elem.Attribute(ns + localName) ?? elem.Attribute(localName);
+        return attr != null ? attr.Value : null;
+    }
+
+    private static Color ParseColor(string hex)
+    {
+        hex = hex.Trim().TrimStart('#');
+        if (hex.Length == 8)
+        {
+            byte a = byte.Parse(hex.Substring(0, 2), NumberStyles.HexNumber);
+            byte r = byte.Parse(hex.Substring(2, 2), NumberStyles.HexNumber);
+            byte g = byte.Parse(hex.Substring(4, 2), NumberStyles.HexNumber);
+            byte b = byte.Parse(hex.Substring(6, 2), NumberStyles.HexNumber);
+            return Color.FromArgb(a, r, g, b);
+        }
+        if (hex.Length == 6)
+        {
+            byte r = byte.Parse(hex.Substring(0, 2), NumberStyles.HexNumber);
+            byte g = byte.Parse(hex.Substring(2, 2), NumberStyles.HexNumber);
+            byte b = byte.Parse(hex.Substring(4, 2), NumberStyles.HexNumber);
+            return Color.FromArgb(255, r, g, b);
+        }
+        if (hex.Length == 3)
+        {
+            byte r = byte.Parse(new string(hex[0], 2), NumberStyles.HexNumber);
+            byte g = byte.Parse(new string(hex[1], 2), NumberStyles.HexNumber);
+            byte b = byte.Parse(new string(hex[2], 2), NumberStyles.HexNumber);
+            return Color.FromArgb(255, r, g, b);
+        }
+        return Colors.Transparent;
+    }
+
+    private static byte[] RenderIconFramePng(VectorDrawableData vectorData, int pixelSize)
+    {
+        double vpW = vectorData.ViewportWidth > 0 ? vectorData.ViewportWidth : 108.0;
+        double vpH = vectorData.ViewportHeight > 0 ? vectorData.ViewportHeight : 108.0;
+
+        DrawingVisual dv = new DrawingVisual();
+        using (DrawingContext dc = dv.RenderOpen())
+        {
+            // Soft rounded squircle badge clip matching modern Windows 11 / Android adaptive icons
+            double pad = pixelSize * (3.5 / 108.0);
+            double badgeSize = pixelSize - (pad * 2.0);
+            double cornerRadius = pixelSize * (22.5 / 108.0);
+
+            RectangleGeometry clipGeo = new RectangleGeometry(
+                new Rect(pad, pad, badgeSize, badgeSize),
+                cornerRadius, cornerRadius);
+            clipGeo.Freeze();
+
+            dc.PushClip(clipGeo);
+
+            // Scale from Android viewport coordinate space (108x108) to target icon pixel size
+            double scaleX = pixelSize / vpW;
+            double scaleY = pixelSize / vpH;
+            ScaleTransform st = new ScaleTransform(scaleX, scaleY);
+            st.Freeze();
+            dc.PushTransform(st);
+
+            // Render all vector drawable paths in exact order as defined in Android ic_launcher.xml
+            foreach (VectorPathItem item in vectorData.Paths)
+            {
+                dc.DrawGeometry(item.FillBrush, item.StrokePen, item.Geometry);
+            }
+
+            dc.Pop(); // ScaleTransform
+            dc.Pop(); // Clip
+
+            // Subtle perimeter border around the rounded badge for crisp contrast on light/dark themes
+            Pen borderPen = new Pen(
+                new SolidColorBrush(Color.FromArgb(255, 34, 52, 78)),
+                Math.Max(1.0, pixelSize * (1.8 / 108.0)));
+            borderPen.Freeze();
+            dc.DrawGeometry(null, borderPen, clipGeo);
+        }
+
+        RenderTargetBitmap rtb = new RenderTargetBitmap(pixelSize, pixelSize, 96, 96, PixelFormats.Pbgra32);
+        rtb.Render(dv);
+
+        PngBitmapEncoder encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(rtb));
+
+        using (MemoryStream ms = new MemoryStream())
+        {
+            encoder.Save(ms);
+            return ms.ToArray();
+        }
+    }
+
+    private static void SaveMultiSizeIcon(int[] sizes, List<byte[]> pngDataList, string filePath)
     {
         using (FileStream fs = new FileStream(filePath, FileMode.Create, FileAccess.Write))
         using (BinaryWriter bw = new BinaryWriter(fs))
         {
             int count = sizes.Length;
-            bw.Write((short)0);
-            bw.Write((short)1);
+            bw.Write((short)0);   // Reserved
+            bw.Write((short)1);   // Type: 1 = ICO
             bw.Write((short)count);
 
             int dataOffset = 6 + count * 16;
@@ -196,14 +289,14 @@ public class GenerateIcon
             {
                 int sz = sizes[i];
                 byte[] pngBytes = pngDataList[i];
-                bw.Write((byte)(sz >= 256 ? 0 : sz));
-                bw.Write((byte)(sz >= 256 ? 0 : sz));
-                bw.Write((byte)0);
-                bw.Write((byte)0);
-                bw.Write((short)1);
-                bw.Write((short)32);
-                bw.Write(pngBytes.Length);
-                bw.Write(dataOffset);
+                bw.Write((byte)(sz >= 256 ? 0 : sz)); // Width (0 means 256)
+                bw.Write((byte)(sz >= 256 ? 0 : sz)); // Height (0 means 256)
+                bw.Write((byte)0);                    // Color count
+                bw.Write((byte)0);                    // Reserved
+                bw.Write((short)1);                   // Color planes
+                bw.Write((short)32);                  // Bits per pixel
+                bw.Write(pngBytes.Length);            // Size of image data
+                bw.Write(dataOffset);                 // Offset of image data
                 dataOffset += pngBytes.Length;
             }
 

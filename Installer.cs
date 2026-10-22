@@ -1,4 +1,5 @@
-﻿using System;
+﻿using System.Runtime.InteropServices;
+using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -21,6 +22,8 @@ namespace VzpenjacaInstaller
         private const string UninstallExeName = "Odstrani.exe";
         private const string ShortcutName = "Nadzorna plošča vzpenjače.lnk";
         private const string RegistryKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\VzpenjacaKontrola";
+        [DllImport("shell32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern void SHChangeNotify(uint wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
 
         private readonly TextBox _txtInstallDir;
         private readonly CheckBox _chkDesktopShortcut;
@@ -335,6 +338,12 @@ namespace VzpenjacaInstaller
                         runKey.SetValue("VzpenjacaKontrola", "\"" + targetExePath + "\"");
                     }
                 }
+            }
+            catch { }
+
+            try
+            {
+                SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero);
             }
             catch { }
 

@@ -16,6 +16,7 @@ using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Shell;
 using System.Windows.Threading;
@@ -3721,6 +3722,10 @@ namespace VzpenjacaKontrola
         public CloudSettingsDialog(Window owner, AppConfig config, CloudRelayBridge bridge)
         {
             Owner = owner;
+            if (owner != null && owner.Icon != null)
+            {
+                Icon = owner.Icon;
+            }
             _config = config;
             _bridge = bridge;
 
@@ -3888,6 +3893,10 @@ namespace VzpenjacaKontrola
         public VoiceSettingsDialog(Window owner, AppConfig config)
         {
             Owner = owner;
+            if (owner != null && owner.Icon != null)
+            {
+                Icon = owner.Icon;
+            }
             _config = config;
 
             Title = "Glasovno obvestilo ob odhodu — Vzpenjača";
@@ -4084,6 +4093,10 @@ namespace VzpenjacaKontrola
         public FunicularDirectionDialog(Window owner, bool currentlyZgornjaToSpodnja)
         {
             Owner = owner;
+            if (owner != null && owner.Icon != null)
+            {
+                Icon = owner.Icon;
+            }
             Title = "Menjava smeri tirnice — Vzpenjača";
             Width = 390;
             SizeToContent = SizeToContent.Height;
@@ -4323,6 +4336,7 @@ namespace VzpenjacaKontrola
             MinHeight = 460;
             Topmost = _config.AlwaysOnTop;
             ApplyWindowChrome();
+            LoadAppIcon();
 
             if (IsPositionValid(_config.WindowLeft, _config.WindowTop, _config.WindowWidth, _config.WindowHeight))
             {
@@ -4730,6 +4744,7 @@ namespace VzpenjacaKontrola
         {
             _config.HideWindowControls = !_config.HideWindowControls;
             ApplyWindowChrome();
+            LoadAppIcon();
             _config.Save();
             RefreshSystemMenu();
         }
@@ -4815,6 +4830,76 @@ namespace VzpenjacaKontrola
             }
         }
 
+        private Drawing.Icon _appIconDrawing;
+
+        private void LoadAppIcon()
+        {
+            try
+            {
+                // 1. Try embedded manifest resource app.ico (multi-size, high-DPI)
+                Assembly asm = Assembly.GetExecutingAssembly();
+                using (Stream stream = asm.GetManifestResourceStream("app.ico"))
+                {
+                    if (stream != null)
+                    {
+                        byte[] icoBytes;
+                        using (MemoryStream ms = new MemoryStream())
+                        {
+                            stream.CopyTo(ms);
+                            icoBytes = ms.ToArray();
+                        }
+                        using (MemoryStream msIcon = new MemoryStream(icoBytes))
+                        {
+                            Icon = BitmapFrame.Create(msIcon, BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+                        }
+                        using (MemoryStream msDrawing = new MemoryStream(icoBytes))
+                        {
+                            _appIconDrawing = new Drawing.Icon(msDrawing);
+                        }
+                        return;
+                    }
+                }
+            }
+            catch { }
+
+            // 2. Fallback to app.ico in base directory
+            try
+            {
+                string icoPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
+                if (File.Exists(icoPath))
+                {
+                    using (FileStream fs = new FileStream(icoPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    {
+                        Icon = BitmapFrame.Create(fs, BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+                    }
+                    _appIconDrawing = new Drawing.Icon(icoPath);
+                    return;
+                }
+            }
+            catch { }
+
+            // 3. Fallback to exe associated icon
+            try
+            {
+                string exe = Process.GetCurrentProcess().MainModule.FileName;
+                if (File.Exists(exe))
+                {
+                    _appIconDrawing = Drawing.Icon.ExtractAssociatedIcon(exe);
+                    if (_appIconDrawing != null)
+                    {
+                        Icon = Imaging.CreateBitmapSourceFromHIcon(
+                            _appIconDrawing.Handle,
+                            Int32Rect.Empty,
+                            BitmapSizeOptions.FromEmptyOptions());
+                        return;
+                    }
+                }
+            }
+            catch { }
+
+            _appIconDrawing = Drawing.SystemIcons.Application;
+        }
+
         private void InitializeTrayIcon()
         {
             try
@@ -4822,46 +4907,12 @@ namespace VzpenjacaKontrola
                 _trayIcon = new Forms.NotifyIcon();
                 _trayIcon.Text = "Nadzorna plošča vzpenjače";
 
-                Drawing.Icon appIcon = null;
-                try
+                if (_appIconDrawing == null)
                 {
-                    string exe = Process.GetCurrentProcess().MainModule.FileName;
-                    if (File.Exists(exe))
-                    {
-                        appIcon = Drawing.Icon.ExtractAssociatedIcon(exe);
-                    }
-                }
-                catch { }
-
-                if (appIcon == null)
-                {
-                    try
-                    {
-                        string icoPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
-                        if (File.Exists(icoPath))
-                        {
-                            appIcon = new Drawing.Icon(icoPath);
-                        }
-                    }
-                    catch { }
+                    LoadAppIcon();
                 }
 
-                if (appIcon == null)
-                {
-                    appIcon = Drawing.SystemIcons.Application;
-                }
-
-                _trayIcon.Icon = appIcon;
-
-                try
-                {
-                    Icon = Imaging.CreateBitmapSourceFromHIcon(
-                        appIcon.Handle,
-                        Int32Rect.Empty,
-                        System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
-                }
-                catch { }
-
+                _trayIcon.Icon = _appIconDrawing ?? Drawing.SystemIcons.Application;
                 Forms.ContextMenu trayMenu = new Forms.ContextMenu();
 
                 Forms.MenuItem mnuOpen = new Forms.MenuItem("Prikaži Vzpenjačo", (s, e) => ShowAndRestoreWindow());
