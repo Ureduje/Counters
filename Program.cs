@@ -1100,6 +1100,95 @@ namespace VzpenjacaKontrola
     }
 
     /// <summary>
+    /// Compact minimize (-) button shown in the top station header when window controls are hidden.
+    /// </summary>
+    public class HeaderMinimizeButton : Border
+    {
+        private bool _isHovered;
+        private bool _isPressed;
+        private readonly System.Windows.Shapes.Path _iconPath;
+
+        private static readonly Geometry GeomMinimize = Geometry.Parse("M 3.5,8 L 12.5,8");
+
+        public event Action Clicked;
+
+        public HeaderMinimizeButton()
+        {
+            Width = 28;
+            Height = 22;
+            CornerRadius = new CornerRadius(5);
+            BorderThickness = new Thickness(1);
+            Cursor = Cursors.Hand;
+            SnapsToDevicePixels = true;
+            VerticalAlignment = VerticalAlignment.Center;
+            ToolTip = "Minimiraj okno";
+
+            Canvas iconCanvas = new Canvas
+            {
+                Width = 16,
+                Height = 16,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            _iconPath = new System.Windows.Shapes.Path
+            {
+                Data = GeomMinimize,
+                StrokeThickness = 1.6,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                StrokeLineJoin = PenLineJoin.Round
+            };
+
+            iconCanvas.Children.Add(_iconPath);
+            Child = iconCanvas;
+
+            MouseEnter += (s, e) => { _isHovered = true; UpdateVisuals(); };
+            MouseLeave += (s, e) => { _isHovered = false; _isPressed = false; UpdateVisuals(); };
+            MouseLeftButtonDown += (s, e) =>
+            {
+                _isPressed = true;
+                UpdateVisuals();
+                e.Handled = true;
+            };
+            MouseLeftButtonUp += (s, e) =>
+            {
+                if (_isPressed)
+                {
+                    _isPressed = false;
+                    UpdateVisuals();
+                    if (Clicked != null) Clicked();
+                }
+                e.Handled = true;
+            };
+
+            UpdateVisuals();
+        }
+
+        private void UpdateVisuals()
+        {
+            if (_isPressed)
+            {
+                Background = ThemePalette.BtnPressedBg;
+                BorderBrush = ThemePalette.AccentBlue;
+                _iconPath.Stroke = ThemePalette.TextPrimary;
+            }
+            else if (_isHovered)
+            {
+                Background = ThemePalette.BtnHoverBg;
+                BorderBrush = ThemePalette.BtnHoverBorder;
+                _iconPath.Stroke = ThemePalette.TextPrimary;
+            }
+            else
+            {
+                Background = ThemePalette.BtnBg;
+                BorderBrush = ThemePalette.BtnBorder;
+                _iconPath.Stroke = ThemePalette.TextSecondary;
+            }
+        }
+    }
+
+    /// <summary>
     /// Horizontal real-time visualization of the single funicular car on tracks,
     /// ported from Android's FunicularTrackView and placed between Zgornja and Spodnja station cards.
     /// </summary>
@@ -1524,6 +1613,7 @@ namespace VzpenjacaKontrola
         public event Action<bool> TelemetryUpdated;
         public event Action StateTicked;
         public event Action DepartureDetected;
+        public event Action MinimizeRequested;
 
         private readonly TextBlock _lblStation;
         private readonly StackPanel _statusPanel;
@@ -1531,6 +1621,7 @@ namespace VzpenjacaKontrola
         private readonly TextBlock _statusText;
         private readonly HeaderQuickToggleButton _btnMute;
         private readonly HeaderQuickToggleButton _btnDim;
+        private readonly HeaderMinimizeButton _btnMinimize;
 
         private readonly Grid _contentGrid;
         private readonly Grid _timeSection;
@@ -1585,6 +1676,20 @@ namespace VzpenjacaKontrola
         private bool _showCapacityUnder = true;
         private int _counterViewMode = 0;
         private double _extraVerticalHeightReduction = 0.0;
+        private bool _showMinimizeButton = false;
+
+        public bool ShowMinimizeButton
+        {
+            get { return _showMinimizeButton; }
+            set
+            {
+                _showMinimizeButton = value;
+                if (_btnMinimize != null)
+                {
+                    _btnMinimize.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+                }
+            }
+        }
 
         public bool IsOnline { get { return _isOnline; } }
         public int CurrentPersons { get { return _currentPersons; } }
@@ -1866,6 +1971,17 @@ namespace VzpenjacaKontrola
             rightHeaderPanel.Children.Add(_btnMute);
             rightHeaderPanel.Children.Add(_btnDim);
             rightHeaderPanel.Children.Add(_statusPanel);
+
+            _btnMinimize = new HeaderMinimizeButton
+            {
+                Margin = new Thickness(10, 0, 0, 0),
+                Visibility = _showMinimizeButton ? Visibility.Visible : Visibility.Collapsed
+            };
+            _btnMinimize.Clicked += () =>
+            {
+                if (MinimizeRequested != null) MinimizeRequested();
+            };
+            rightHeaderPanel.Children.Add(_btnMinimize);
 
             headerGrid.Children.Add(_lblStation);
             headerGrid.Children.Add(rightHeaderPanel);
@@ -4354,6 +4470,11 @@ namespace VzpenjacaKontrola
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
             _cardZgoraj = new StationCardControl("ZGORNJA POSTAJA", _config.IpZgoraj, _config.CounterScale, _config.MuteZgoraj, _config.DimZgoraj, _config.ShowIntervalBgZgoraj, _config.ShowCapacityZgoraj, _config.CounterViewMode);
+            _cardZgoraj.ShowMinimizeButton = _config.HideWindowControls;
+            _cardZgoraj.MinimizeRequested += () =>
+            {
+                WindowState = WindowState.Minimized;
+            };
             _cardZgoraj.QuickSettingsChanged += () =>
             {
                 _config.MuteZgoraj = _cardZgoraj.IsMuted;
@@ -4718,11 +4839,13 @@ namespace VzpenjacaKontrola
                 };
                 WindowChrome.SetWindowChrome(this, chrome);
                 WindowStyle = WindowStyle.None;
+                if (_cardZgoraj != null) _cardZgoraj.ShowMinimizeButton = true;
             }
             else
             {
                 WindowChrome.SetWindowChrome(this, null);
                 WindowStyle = WindowStyle.SingleBorderWindow;
+                if (_cardZgoraj != null) _cardZgoraj.ShowMinimizeButton = false;
             }
         }
 
