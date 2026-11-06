@@ -27,8 +27,8 @@ using Drawing = System.Drawing;
 [assembly: AssemblyDescription("Nadzorna plošča vzpenjače — Zgornja in spodnja postaja")]
 [assembly: AssemblyCompany("Vzpenjača")]
 [assembly: AssemblyProduct("Vzpenjača")]
-[assembly: AssemblyVersion("1.2.4.0")]
-[assembly: AssemblyFileVersion("1.2.4.0")]
+[assembly: AssemblyVersion("1.2.6.0")]
+[assembly: AssemblyFileVersion("1.2.6.0")]
 
 namespace VzpenjacaKontrola
 {
@@ -69,6 +69,7 @@ namespace VzpenjacaKontrola
         public bool ShowIntervalBgSpodaj = true;
         public bool ShowCapacityZgoraj = true;
         public bool ShowCapacitySpodaj = true;
+        public bool ShowLastRidePersons = true;
         public int CounterViewMode = 0;
         public bool ShowFunicularTrack = true;
         public bool FunicularTrackReversed = false;
@@ -197,6 +198,10 @@ namespace VzpenjacaKontrola
                         {
                             cfg.ShowCapacitySpodaj = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
                         }
+                        else if (key.Equals("ShowLastRidePersons", StringComparison.OrdinalIgnoreCase))
+                        {
+                            cfg.ShowLastRidePersons = val.Equals("true", StringComparison.OrdinalIgnoreCase) || val == "1";
+                        }
                         else if (key.Equals("CounterViewMode", StringComparison.OrdinalIgnoreCase))
                         {
                             int cvm;
@@ -283,6 +288,7 @@ namespace VzpenjacaKontrola
                 sb.AppendLine("ShowIntervalBgSpodaj=" + (ShowIntervalBgSpodaj ? "true" : "false"));
                 sb.AppendLine("ShowCapacityZgoraj=" + (ShowCapacityZgoraj ? "true" : "false"));
                 sb.AppendLine("ShowCapacitySpodaj=" + (ShowCapacitySpodaj ? "true" : "false"));
+                sb.AppendLine("ShowLastRidePersons=" + (ShowLastRidePersons ? "true" : "false"));
                 sb.AppendLine("CounterViewMode=" + CounterViewMode.ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("ShowFunicularTrack=" + (ShowFunicularTrack ? "true" : "false"));
                 sb.AppendLine("FunicularTrackReversed=" + (FunicularTrackReversed ? "true" : "false"));
@@ -1643,6 +1649,7 @@ namespace VzpenjacaKontrola
         private readonly TextBlock _txtPersonsMax;
         private readonly TextBlock _txtSetCapacityValue;
         private readonly TextBlock _txtUnderCapacityValue;
+        private readonly TextBlock _txtLastRidePersons;
         private readonly Border _personsProgressFill;
         private readonly Border _personsProgressTrack;
 
@@ -1658,9 +1665,12 @@ namespace VzpenjacaKontrola
         private DateTime _lastTimeframeCommandUtc = DateTime.MinValue;
         private int _currentPersons = 0;
         private int _maxPersons = 0;
+        private int _lastRidePersons = -1;
+        private DateTime _lastPersonsResetUtc = DateTime.MinValue;
         private readonly System.Collections.Generic.List<long> _hourlyEntryUnixMs = new System.Collections.Generic.List<long>();
         private readonly object _hourlyGateLock = new object();
         private readonly string _hourlyPersistenceFilePath;
+        private readonly string _lastRidePersistenceFilePath;
         private bool _isOnline = false;
         private bool _isPolling = false;
         private bool _isCommandBusy = false;
@@ -1674,6 +1684,7 @@ namespace VzpenjacaKontrola
         private bool _isDimmed = false;
         private bool _showIntervalBg = true;
         private bool _showCapacityUnder = true;
+        private bool _showLastRidePersons = true;
         private int _counterViewMode = 0;
         private double _extraVerticalHeightReduction = 0.0;
         private bool _showMinimizeButton = false;
@@ -1815,6 +1826,16 @@ namespace VzpenjacaKontrola
             }
         }
 
+        public bool ShowLastRidePersons
+        {
+            get { return _showLastRidePersons; }
+            set
+            {
+                _showLastRidePersons = value;
+                UpdateCounterViewVisuals();
+            }
+        }
+
         public int CounterViewMode
         {
             get { return _counterViewMode; }
@@ -1863,18 +1884,22 @@ namespace VzpenjacaKontrola
             bool initialDimmed = false,
             bool initialShowIntervalBg = true,
             bool initialShowCapacityUnder = true,
-            int initialCounterViewMode = 0)
+            int initialCounterViewMode = 0,
+            bool initialShowLastRidePersons = true)
         {
             Client = new FunicularClient(ipAddress, 80);
             string stationKey = (stationName != null && stationName.IndexOf("SPOD", StringComparison.OrdinalIgnoreCase) >= 0) ? "spodaj" : "zgoraj";
             string appDataDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VzpenjacaKontrola");
             _hourlyPersistenceFilePath = System.IO.Path.Combine(appDataDir, "hourly_entries_" + stationKey + ".txt");
+            _lastRidePersistenceFilePath = System.IO.Path.Combine(appDataDir, "last_ride_persons_" + stationKey + ".txt");
             LoadHourlyEntries();
+            LoadLastRidePersons();
             _currentScale = Math.Max(0.65, Math.Min(1.90, initialScale));
             _isMuted = initialMuted;
             _isDimmed = initialDimmed;
             _showIntervalBg = initialShowIntervalBg;
             _showCapacityUnder = initialShowCapacityUnder;
+            _showLastRidePersons = initialShowLastRidePersons;
             _counterViewMode = (initialCounterViewMode == 1) ? 1 : 0;
 
             Background = ThemePalette.CardBg;
@@ -2341,6 +2366,24 @@ namespace VzpenjacaKontrola
             personsViewbox.Child = personsVerticalStack;
             Grid.SetRow(personsViewbox, 1);
 
+            _txtLastRidePersons = new TextBlock
+            {
+                Text = _lastRidePersons >= 0
+                    ? ("Zadnja vožnja: " + _lastRidePersons.ToString("00", CultureInfo.InvariantCulture))
+                    : "Zadnja vožnja: --",
+                Foreground = ThemePalette.TextSecondary,
+                FontFamily = new FontFamily("Segoe UI Semibold, Segoe UI"),
+                FontSize = 10.5,
+                FontWeight = FontWeights.SemiBold,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Margin = new Thickness(0, 0, 0, 3),
+                ToolTip = "Število oseb zadnje vožnje",
+                Visibility = _showLastRidePersons ? Visibility.Visible : Visibility.Collapsed
+            };
+            Typography.SetNumeralAlignment(_txtLastRidePersons, FontNumeralAlignment.Tabular);
+            Grid.SetRow(_txtLastRidePersons, 1);
+
             _personsProgressTrack = new Border
             {
                 Height = 4,
@@ -2362,6 +2405,7 @@ namespace VzpenjacaKontrola
 
             personsDisplayGrid.Children.Add(personsTopRow);
             personsDisplayGrid.Children.Add(personsViewbox);
+            personsDisplayGrid.Children.Add(_txtLastRidePersons);
             personsDisplayGrid.Children.Add(_personsProgressTrack);
             personsDisplayBox.Child = personsDisplayGrid;
             Grid.SetRow(personsDisplayBox, 0);
@@ -2495,6 +2539,10 @@ namespace VzpenjacaKontrola
             if (_txtUnderCapacityValue != null)
             {
                 _txtUnderCapacityValue.Visibility = (isUnderMode && _showCapacityUnder) ? Visibility.Visible : Visibility.Collapsed;
+            }
+            if (_txtLastRidePersons != null)
+            {
+                _txtLastRidePersons.Visibility = _showLastRidePersons ? Visibility.Visible : Visibility.Collapsed;
             }
 
             ApplyCounterScale(_currentScale);
@@ -2864,6 +2912,12 @@ namespace VzpenjacaKontrola
                 RecordHourlyGateEntries(enteredDelta);
                 hourlyChanged = true;
             }
+            else if (!isFirstLoad && !wasOffline && prevPersons > 0 && t.CurrentPersons < prevPersons)
+            {
+                _lastRidePersons = prevPersons;
+                _lastPersonsResetUtc = DateTime.UtcNow;
+                SaveLastRidePersons();
+            }
 
             if (isFirstLoad)
             {
@@ -2887,6 +2941,20 @@ namespace VzpenjacaKontrola
                     long newElapsed = Math.Max(1L, t.SetTimeMs - effectiveRemMs);
                     _rideOriginUtc = DateTime.UtcNow - TimeSpan.FromMilliseconds(newElapsed);
                     _hasRideOrigin = true;
+
+                    if (prevPersons > 0 && t.CurrentPersons == prevPersons)
+                    {
+                        _lastRidePersons = prevPersons;
+                        _lastPersonsResetUtc = DateTime.UtcNow;
+                        SaveLastRidePersons();
+                    }
+                    else if (prevPersons == 0 && t.CurrentPersons == 0 &&
+                             (DateTime.UtcNow - _lastPersonsResetUtc).TotalSeconds >= 15.0)
+                    {
+                        _lastRidePersons = 0;
+                        _lastPersonsResetUtc = DateTime.UtcNow;
+                        SaveLastRidePersons();
+                    }
 
                     if (t.CurrentPersons == 0 || t.CurrentPersons < prevPersons)
                     {
@@ -2922,6 +2990,41 @@ namespace VzpenjacaKontrola
         private static long CurrentUnixTimeMs()
         {
             return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+        }
+
+        private void LoadLastRidePersons()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_lastRidePersistenceFilePath) || !File.Exists(_lastRidePersistenceFilePath))
+                    return;
+                string raw = File.ReadAllText(_lastRidePersistenceFilePath, Encoding.UTF8).Trim();
+                int count;
+                if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out count) && count >= 0)
+                {
+                    _lastRidePersons = count;
+                }
+            }
+            catch { }
+        }
+
+        private void SaveLastRidePersons()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(_lastRidePersistenceFilePath) || _lastRidePersons < 0)
+                    return;
+                string dir = System.IO.Path.GetDirectoryName(_lastRidePersistenceFilePath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+                File.WriteAllText(
+                    _lastRidePersistenceFilePath,
+                    _lastRidePersons.ToString(CultureInfo.InvariantCulture),
+                    Encoding.UTF8);
+            }
+            catch { }
         }
 
         private void LoadHourlyEntries()
@@ -3046,6 +3149,13 @@ namespace VzpenjacaKontrola
                 _txtUnderCapacityValue.Text = "--";
                 _txtUnderCapacityValue.Foreground = ThemePalette.TextMuted;
             }
+            if (_txtLastRidePersons != null)
+            {
+                _txtLastRidePersons.Text = _lastRidePersons >= 0
+                    ? ("Zadnja vožnja: " + _lastRidePersons.ToString("00", CultureInfo.InvariantCulture))
+                    : "Zadnja vožnja: --";
+                _txtLastRidePersons.Foreground = ThemePalette.TextMuted;
+            }
             _timerProgressFill.Width = 0;
             _personsProgressFill.Width = 0;
 
@@ -3133,6 +3243,13 @@ namespace VzpenjacaKontrola
             {
                 _txtUnderCapacityValue.Text = formattedMax;
                 _txtUnderCapacityValue.Foreground = ThemePalette.TextPrimary;
+            }
+            if (_txtLastRidePersons != null)
+            {
+                _txtLastRidePersons.Text = _lastRidePersons >= 0
+                    ? ("Zadnja vožnja: " + _lastRidePersons.ToString("00", CultureInfo.InvariantCulture))
+                    : "Zadnja vožnja: --";
+                _txtLastRidePersons.Foreground = ThemePalette.TextSecondary;
             }
 
             int personsZone;
@@ -4381,6 +4498,7 @@ namespace VzpenjacaKontrola
         private const int IDM_FUNICULAR_DIRECTION = 0x1017;
         private const int IDM_FUNICULAR_MOTION_LINEAR = 0x1018;
         private const int IDM_FUNICULAR_MOTION_GRAPH = 0x101A;
+        private const int IDM_SHOW_LAST_RIDE_PERSONS = 0x101B;
         private const int IDM_EXIT = 0x1019;
         private const int IDM_VERSION = 0x1020;
 
@@ -4469,7 +4587,7 @@ namespace VzpenjacaKontrola
             mainGrid.RowDefinitions.Add(_rowFunicularTrack);
             mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-            _cardZgoraj = new StationCardControl("ZGORNJA POSTAJA", _config.IpZgoraj, _config.CounterScale, _config.MuteZgoraj, _config.DimZgoraj, _config.ShowIntervalBgZgoraj, _config.ShowCapacityZgoraj, _config.CounterViewMode);
+            _cardZgoraj = new StationCardControl("ZGORNJA POSTAJA", _config.IpZgoraj, _config.CounterScale, _config.MuteZgoraj, _config.DimZgoraj, _config.ShowIntervalBgZgoraj, _config.ShowCapacityZgoraj, _config.CounterViewMode, _config.ShowLastRidePersons);
             _cardZgoraj.ShowMinimizeButton = _config.HideWindowControls;
             _cardZgoraj.MinimizeRequested += () =>
             {
@@ -4508,7 +4626,7 @@ namespace VzpenjacaKontrola
             };
             Grid.SetRow(_funicularTrack, 1);
 
-            _cardSpodaj = new StationCardControl("SPODNJA POSTAJA", _config.IpSpodaj, _config.CounterScale, _config.MuteSpodaj, _config.DimSpodaj, _config.ShowIntervalBgSpodaj, _config.ShowCapacitySpodaj, _config.CounterViewMode);
+            _cardSpodaj = new StationCardControl("SPODNJA POSTAJA", _config.IpSpodaj, _config.CounterScale, _config.MuteSpodaj, _config.DimSpodaj, _config.ShowIntervalBgSpodaj, _config.ShowCapacitySpodaj, _config.CounterViewMode, _config.ShowLastRidePersons);
             _cardSpodaj.QuickSettingsChanged += () =>
             {
                 _config.MuteSpodaj = _cardSpodaj.IsMuted;
@@ -4690,6 +4808,15 @@ namespace VzpenjacaKontrola
             _config.CounterViewMode = normalized;
             _cardZgoraj.CounterViewMode = normalized;
             _cardSpodaj.CounterViewMode = normalized;
+            _config.Save();
+            RefreshSystemMenu();
+        }
+
+        public void ToggleLastRidePersons()
+        {
+            _config.ShowLastRidePersons = !_config.ShowLastRidePersons;
+            if (_cardZgoraj != null) _cardZgoraj.ShowLastRidePersons = _config.ShowLastRidePersons;
+            if (_cardSpodaj != null) _cardSpodaj.ShowLastRidePersons = _config.ShowLastRidePersons;
             _config.Save();
             RefreshSystemMenu();
         }
@@ -4909,6 +5036,7 @@ namespace VzpenjacaKontrola
                 uint cloudFlag = _config.CloudRelayEnabled ? MF_CHECKED : MF_UNCHECKED;
                 uint viewClassicFlag = _config.CounterViewMode == 0 ? MF_CHECKED : MF_UNCHECKED;
                 uint viewUnderFlag = _config.CounterViewMode == 1 ? MF_CHECKED : MF_UNCHECKED;
+                uint lastRidePersonsFlag = _config.ShowLastRidePersons ? MF_CHECKED : MF_UNCHECKED;
                 uint funicularTrackFlag = _config.ShowFunicularTrack ? MF_CHECKED : MF_UNCHECKED;
                 uint funicularDirFlag = _config.FunicularTrackReversed ? MF_CHECKED : MF_UNCHECKED;
                 uint funicularLinearFlag = _config.FunicularMotionMode == 0 ? MF_CHECKED : MF_UNCHECKED;
@@ -4922,6 +5050,7 @@ namespace VzpenjacaKontrola
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | viewClassicFlag, (UIntPtr)IDM_VIEW_CLASSIC, "Prikaz števcev: Klasični (ob številki)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | viewUnderFlag, (UIntPtr)IDM_VIEW_UNDER, "Prikaz števcev: Pod številko (spodaj)");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | lastRidePersonsFlag, (UIntPtr)IDM_SHOW_LAST_RIDE_PERSONS, "Prikaz števila oseb zadnje vožnje");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | funicularTrackFlag, (UIntPtr)IDM_SHOW_FUNICULAR_TRACK, "Prikaz položaja vzpenjače");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | funicularDirFlag, (UIntPtr)IDM_FUNICULAR_DIRECTION, "Obrni smer tirnice (Zgornja ↔ Spodnja)");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING | funicularLinearFlag, (UIntPtr)IDM_FUNICULAR_MOTION_LINEAR, "Gibanje vzpenjače: Linearno (čas)");
@@ -4933,7 +5062,7 @@ namespace VzpenjacaKontrola
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_EXIT, "Izhod iz programa");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
-                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.2.4");
+                InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_STRING, (UIntPtr)IDM_VERSION, "Različica 1.2.6");
                 InsertMenu(_hSysMenu, SC_CLOSE, MF_BYCOMMAND | MF_SEPARATOR, UIntPtr.Zero, string.Empty);
             }
         }
@@ -4994,6 +5123,7 @@ namespace VzpenjacaKontrola
                 Forms.MenuItem mnuSound = new Forms.MenuItem("Zvočna opozorila", (s, e) => ToggleSound());
                 Forms.MenuItem mnuViewClassic = new Forms.MenuItem("Prikaz števcev: Klasični", (s, e) => SetCounterViewMode(0));
                 Forms.MenuItem mnuViewUnder = new Forms.MenuItem("Prikaz števcev: Pod številko", (s, e) => SetCounterViewMode(1));
+                Forms.MenuItem mnuLastRidePersons = new Forms.MenuItem("Prikaz števila oseb zadnje vožnje", (s, e) => ToggleLastRidePersons());
                 Forms.MenuItem mnuFunicularTrack = new Forms.MenuItem("Prikaz položaja vzpenjače", (s, e) => ToggleFunicularTrack());
                 Forms.MenuItem mnuFunicularDir = new Forms.MenuItem("Obrni smer tirnice (Zgornja ↔ Spodnja)", (s, e) => ToggleFunicularDirection());
                 Forms.MenuItem mnuFunicularMotionLinear = new Forms.MenuItem("Gibanje vzpenjače: Linearno (čas)", (s, e) => SetFunicularMotionMode(0));
@@ -5006,6 +5136,7 @@ namespace VzpenjacaKontrola
                     mnuSound.Checked = _config.SoundEnabled;
                     mnuViewClassic.Checked = (_config.CounterViewMode == 0);
                     mnuViewUnder.Checked = (_config.CounterViewMode == 1);
+                    mnuLastRidePersons.Checked = _config.ShowLastRidePersons;
                     mnuFunicularTrack.Checked = _config.ShowFunicularTrack;
                     mnuFunicularDir.Checked = _config.FunicularTrackReversed;
                     mnuFunicularDir.Enabled = _config.ShowFunicularTrack;
@@ -5022,6 +5153,7 @@ namespace VzpenjacaKontrola
                 trayMenu.MenuItems.Add("-");
                 trayMenu.MenuItems.Add(mnuViewClassic);
                 trayMenu.MenuItems.Add(mnuViewUnder);
+                trayMenu.MenuItems.Add(mnuLastRidePersons);
                 trayMenu.MenuItems.Add(mnuFunicularTrack);
                 trayMenu.MenuItems.Add(mnuFunicularDir);
                 trayMenu.MenuItems.Add(mnuFunicularMotionLinear);
@@ -5212,6 +5344,11 @@ namespace VzpenjacaKontrola
                     SetCounterViewMode(1);
                     handled = true;
                 }
+                else if (cmd == IDM_SHOW_LAST_RIDE_PERSONS)
+                {
+                    ToggleLastRidePersons();
+                    handled = true;
+                }
                 else if (cmd == IDM_SHOW_FUNICULAR_TRACK)
                 {
                     ToggleFunicularTrack();
@@ -5255,7 +5392,7 @@ namespace VzpenjacaKontrola
                 else if (cmd == IDM_VERSION)
                 {
                     MessageBox.Show(
-                        "Nadzorna plošča vzpenjače\nRazličica 1.2.4\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj + "\nMobilni kanal: " + _config.CloudChannelId,
+                        "Nadzorna plošča vzpenjače\nRazličica 1.2.6\n\nZgornja postaja: " + _config.IpZgoraj + "\nSpodnja postaja: " + _config.IpSpodaj + "\nMobilni kanal: " + _config.CloudChannelId,
                         "O programu — Vzpenjača",
                         MessageBoxButton.OK,
                         MessageBoxImage.Information);
